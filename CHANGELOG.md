@@ -6,6 +6,64 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The native SPICE stack is built from source** (`scripts/build-deps.sh`, `make
+  setup`) instead of downloaded as a prebuilt UTM sysroot. Every package is pinned
+  in `deps/sources.lock` — releases by URL and SHA-256, the SPICE projects
+  (spice-gtk, spice-protocol, usbredir) by git commit, since they tag releases
+  rarely — and our changes live as reviewable patches in `deps/patches/`. The build
+  is hermetic (nothing from Homebrew is linked) and a final check rejects any
+  library that is not `@rpath`-relative or targets a macOS newer than 12. Current
+  upstream versions replace the sysroot's glib 2.69 / GStreamer 1.19.1 /
+  spice-gtk 0.42.
+- **Hardware H.264 decoding (VideoToolbox)** for SPICE video streams (in our 720p30
+  test, debug logging on: ~11% of a core against ~26% for MJPEG). Opt-in
+  (`SPICE_PREFERRED_VIDEO_CODECS=h264,mjpeg`): the spice-server shipped with
+  Proxmox VE 9 crashed in testing when an H.264 stream was torn down. README ▸
+  *Video streaming* explains what the VM needs for streaming at all (`qxl` display,
+  `videostreaming` on).
+
+### Changed
+
+- **Video no longer lags 400 ms behind the guest** unless it is playing sound:
+  streamed frames are shown ~50 ms after they arrive (`SPICE_STREAM_PLAYOUT_MS`;
+  `0` restores the stock behaviour). Click to the client's framebuffer in our LAN
+  test: a median 154 ms instead of ~500 ms, with the same smoothness. Sounds
+  shorter than a few seconds (notifications) leave its timing alone; longer ones
+  hand it back to the server's timing, lined up with the audio, 3–4 s in.
+- **MJPEG frames are decoded ahead of their display time** instead of at it: with
+  four streams, frames were shown on average 2.2 ms after their time instead of
+  5.8 ms (max 5 instead of 12), which also removes the "rendering too late"
+  drops when several streams' frames fall due together.
+- The display view no longer acquires a drawable on every vsync when there is
+  nothing new to draw (it still redraws on a resize), and runs at up to 120 Hz
+  on displays that support it.
+- The native libraries are embedded as plain `@rpath` dylibs (the runtime closure,
+  computed from the executable) rather than framework bundles; 21 instead of 26.
+  No webdav/libsoup/phodav, GNU libiconv or GNU libintl any more.
+- CocoaSpice re-based onto upstream (utmapp/CocoaSpice d8d29fc), bringing in the
+  per-iteration autorelease pool on the SPICE thread (Objective-C objects created by
+  SPICE callbacks were never released) and a port write-buffer lifetime fix.
+- License notices updated for the new stack: OpenSSL 3 is Apache-2.0; PCRE2 and
+  libucontext (ISC) are listed.
+
+### Fixed
+
+- **Video froze for ~1.5 s whenever the guest started a sound**, and the server
+  then lowered the stream's frame rate: the audio backend reported a 0 ms output
+  delay before its pipeline was running, which ran the clock ahead of every
+  video frame.
+- **Scroll direction was inverted** in the guest relative to the Mac, whatever the
+  natural-scrolling setting.
+- **Build with Xcode 27 / Swift 6.4**: SwiftPM now emits a macOS-layout resource
+  bundle, which `build-app.sh` turned into an unsignable hybrid.
+
+### Removed
+
+- `scripts/fetch-sysroot.sh` and `scripts/upgrade-openssl.sh` (the prebuilt-sysroot
+  flow), and the `Frameworks/` staging directory.
+
 ## [0.1.8] — 2026-08-28
 
 ### Added

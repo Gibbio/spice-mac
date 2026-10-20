@@ -9,8 +9,8 @@ virtual-machine consoles from `.vv` connection files, built on a forked
 [CocoaSpice](https://github.com/utmapp/CocoaSpice) (the Metal-rendered SPICE layer
 UTM uses). Apple-Silicon only.
 
-> **Status: working** against a real Proxmox VE VM (Xcode 26.5 + the UTM arm64
-> sysroot). Verified end-to-end: Metal display with aspect-fit scaling and live
+> **Status: working** against a real Proxmox VE VM (Xcode 27, native stack built
+> from source by `scripts/build-deps.sh`). Verified end-to-end: Metal display with aspect-fit scaling and live
 > resize; keyboard including ⌘/modifiers; mouse with the guest cursor aligned to
 > the macOS pointer; bidirectional clipboard; and audio (needs a SPICE audio
 > device on the VM). USB redirection is plumbed via the Connection menu. The `.vv`
@@ -86,7 +86,7 @@ SpiceController (Swift)           Packages/SpiceController
 CocoaSpice (forked, Obj-C)        ThirdParty/CocoaSpice   ← Proxmox patch
         │   Metal renderer, channels, USB, clipboard over spice-client-glib
         ▼
-Native SPICE frameworks (arm64)   Frameworks/  (staged by scripts/fetch-sysroot.sh)
+Native SPICE stack (arm64)        Sysroot/  (built from source by scripts/build-deps.sh)
         spice-client-glib, glib, gstreamer, libusb, usbredir, openssl, …
 
 Pure-Swift, independently testable:
@@ -108,7 +108,7 @@ adds exactly one method, `-[CSConnection setProxy:ca:certSubject:]`
 - The **Metal toolchain component** — on Xcode 26 it is a separate download:
   `xcodebuild -downloadComponent MetalToolchain`. Needed because SwiftPM does not
   compile `.metal` resources; `build-app.sh` compiles the shader into the bundle.
-- The native SPICE frameworks staged under `Frameworks/` (see *Dependencies*).
+- Homebrew build tools: `brew install meson ninja cmake pkg-config bison` (see *Dependencies*).
 
 ## Build
 
@@ -123,8 +123,8 @@ xcodebuild -downloadComponent MetalToolchain   # Xcode 26: a separate download
 Then, from a fresh clone:
 
 ```sh
-make doctor   # verify Xcode + Metal toolchain + frameworks (prints fixes if not)
-make all      # fetch the pinned sysroot, then build → build/SpiceMac.app
+make doctor   # verify Xcode + Metal toolchain + build tools (prints fixes if not)
+make all      # build the native stack from source, then the app → build/SpiceMac.app
 make run      # open it
 ```
 
@@ -132,7 +132,7 @@ make run      # open it
 forget it (`make help` lists every target). By hand it's:
 
 ```sh
-./scripts/fetch-sysroot.sh   # pinned, checksummed sysroot (OpenSSL already 3.5.6 LTS)
+./scripts/build-deps.sh      # native stack from pinned, checksummed sources → Sysroot/
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./scripts/build-app.sh
 open build/SpiceMac.app
 ```
@@ -140,25 +140,34 @@ open build/SpiceMac.app
 ### Dependencies
 
 CocoaSpice does **not** bundle the native libraries it links (glib, gstreamer,
-spice-client-glib, libusb, …). `scripts/fetch-sysroot.sh` stages them. By default it
-downloads a **pinned, SHA-256-checksummed** tarball published on this repo's
-[releases](https://github.com/Ching367436/spice-mac/releases/tag/sysroot-arm64-v2) —
-the 26-framework + 19-plugin build/runtime closure (LGPL/MIT/BSD/OpenSSL only, **no
-GPL**, OpenSSL already 3.5.6 LTS). So a fresh clone builds with no extra setup, and the
-script fails closed on a checksum mismatch.
+spice-client-glib, libusb, …). `scripts/build-deps.sh` builds them from upstream
+sources into `Sysroot/` (arm64, macOS 12+, every library `@rpath`-relative):
 
-Alternatives (rarely needed):
+- **Pinned and fail-closed.** `deps/sources.lock` fixes each package's version, URL
+  and SHA-256; a mismatch aborts the build. Meson may not fetch subprojects on its
+  own, and nothing may be found or linked from `/opt/homebrew` — Homebrew's meson,
+  ninja, cmake, pkg-config and bison are used only as tools. A final check rejects
+  any library that references a path outside `@rpath` or the OS.
+- **Patched where needed.** `deps/patches/<package>/` holds the patches applied on
+  top of upstream. For spice-gtk: UTM's GMainContext support (CocoaSpice relies on
+  it), a macOS build fix and the VideoToolbox H.264 decoder — see
+  [deps/README.md](deps/README.md).
+- **No GPL.** LGPL / Apache-2.0 / BSD / MIT / ISC only — see
+  [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt).
 
-- **Your own tarball:** set `SPICEMAC_SYSROOT_URL` (+ `SPICEMAC_SYSROOT_SHA256`).
-- **A fresh UTM CI build:** `SPICEMAC_SYSROOT_FROM_GH=1 ./scripts/fetch-sysroot.sh`
-  (needs `gh auth login`; UTM artifacts expire ~90 days). That sysroot ships the EOL
-  OpenSSL 1.1.1b, so follow it with `./scripts/upgrade-openssl.sh` (→ 3.5.6 LTS; see
-  [SECURITY.md](SECURITY.md)).
-- **From source:** UTM's `scripts/build_dependencies.sh -p macos -a arm64` +
-  `pack_dependencies.sh`.
+A first build takes a few minutes; later runs only rebuild what changed
+(`./scripts/build-deps.sh <package>` forces one, `--clean` starts over). CocoaSpice
+compiles against the headers installed into `Sysroot/`, so they always match the
+libraries.
 
-The vendored `ThirdParty/CocoaSpice/Sources/CocoaSpice/ExternalHeaders/` provides
-the matching build-time headers; keep the sysroot version in sync with them.
+### Updating a dependency
+
+Every version is one line in `deps/sources.lock`. Edit it — a new version + URL for a
+release (the build stops and prints the new SHA-256 to verify and paste in), or a new
+commit id for the SPICE projects, which are followed from git because they tag
+releases rarely (`git ls-remote <url> <branch>`) — then `./scripts/build-deps.sh`
+rebuilds just what changed. If one of our patches no longer applies, see
+[deps/README.md](deps/README.md).
 
 ## Connecting to Proxmox
 
@@ -176,6 +185,36 @@ What the app does with the `.vv`: parses the opaque `host` token, `proxy`
 (expanding the escaped `\n`), then connects over TLS through the node's
 `spiceproxy`, verifying the server by **certificate subject** against the supplied
 CA.
+
+## Video streaming
+
+SPICE sends video as a compressed **stream** only when the server is told to, and
+only when it can see the video as one region:
+
+- **Display: `qxl`**, not `virtio`. With `virtio` (and other non-QXL displays) QEMU
+  reports screen updates as 32-pixel-wide column strips, which the server never
+  recognises as video: every frame then arrives as dozens of lossless images.
+- **Streaming on:** `qm set <vmid> --spice_enhancements videostreaming=all` (or
+  `filter`). Without it QEMU turns streaming **off**.
+
+Streams arrive as MJPEG by default. SpiceMac can also decode **H.264** in hardware
+(VideoToolbox) — in our 720p30 test (debug logging on) ~11% of a core against ~26%
+for MJPEG. The server needs
+`gstreamer1.0-plugins-ugly` (x264) for it, and the client asks for it only when
+started with `SPICE_PREFERRED_VIDEO_CODECS=h264,mjpeg` — opt-in, because the
+spice-server shipped with Proxmox VE 9 (0.15.2) crashed in our tests when an
+H.264 stream was torn down, taking the VM down with it.
+
+**Latency.** The server keeps the client's clock 400 ms behind its own, as room to
+line video up with buffered audio. Unless the guest is playing sound, SpiceMac
+shows each frame about 50 ms after it arrives instead (`SPICE_STREAM_PLAYOUT_MS`,
+default `50`; `0` restores the stock behaviour). Measured with a headless client
+on the same SPICE library (LAN, Windows 11 guest, MJPEG, 1280×720), a click
+reached the client's framebuffer in a median 154 ms, against ~500 ms stock.
+Sounds shorter than a few seconds, such as notifications, leave the video's timing
+alone. Longer ones hand the video back to the server's timing, lined up with the
+audio (about 220 ms after arrival in that test): some 3–4 s into the sound, after
+a single pause of about that length.
 
 ## Verifying the tested components
 
@@ -205,10 +244,9 @@ glib/spice headers (`clang -fsyntax-only`, exit 0).
   `ich9-intel-hda`, backend **SPICE**) and reboot the guest.
 - **`pveproxy` gating.** `/etc/default/pveproxy` `ALLOW_FROM`/cipher rules can
   reset port 3128 even with a valid ticket.
-- **Dep ages.** The pinned sysroot ships **OpenSSL 3.5.6 (LTS)** and **spice-gtk 0.42
-  (the latest upstream release)**, but **glib/gstreamer** are still the older UTM build
-  (lower-priority; acceptable for personal use but carry their own CVEs). (A raw UTM
-  sysroot still has OpenSSL 1.1.1b — run `upgrade-openssl.sh`.)
+- **Dep ages.** Every native library is built from a current upstream release pinned
+  in `deps/sources.lock` (spice-gtk 0.43, glib 2.88, GStreamer 1.28, OpenSSL 3.5 LTS);
+  bump them there.
 
 ## Display zoom (Retina)
 
@@ -274,9 +312,9 @@ many JTAG/printer dongles) redirect **without root** — check with
 
 See [SECURITY.md](SECURITY.md). In short: the app code is sound (no RCE/memory-
 corruption; TLS fails closed). The server-exposed native libraries are current —
-**spice-gtk 0.42 is the latest upstream release** and the bundled **OpenSSL is 3.5.6
-(LTS, to 2030)** — while glib/gstreamer are still the older UTM build (lower-priority;
-see SECURITY.md). Clipboard sharing is on by default (toggle in the Connection menu),
+every native library is built from a pinned, current upstream release (**spice-gtk
+0.43**, **OpenSSL 3.5 LTS** (to 2030), glib 2.88, GStreamer 1.28 — see
+`deps/sources.lock`). Clipboard sharing is on by default (toggle in the Connection menu),
 and `run-as-root.sh` runs the whole parser surface as root — fine for personal use
 against trusted VMs.
 
@@ -295,15 +333,16 @@ building from source, and rebuilding to verify a download, will always stay free
 - SpiceMac's own code: **MIT** (see [LICENSE](LICENSE)).
 - `ThirdParty/CocoaSpice`: **Apache-2.0** (vendored fork; `LICENSE` retained, changes in
   [FORK-NOTES.md](ThirdParty/CocoaSpice/FORK-NOTES.md)).
-- The native SPICE stack (fetched at build time, bundled into a built `.app`) is mostly
-  **LGPL-2.1+** (glib/spice-gtk/gstreamer/libusb/usbredir/…), with **OpenSSL** (OpenSSL/
-  SSLeay) and **MIT/BSD** (pixman, opus, libffi, libjpeg-turbo). Full attribution +
+- The native SPICE stack (built from source at build time, bundled into a built `.app`)
+  is mostly **LGPL-2.1+** (glib/spice-gtk/gstreamer/libusb/usbredir/…), with **OpenSSL**
+  (Apache-2.0) and **MIT/BSD/ISC** (pixman, opus, libffi, libjpeg-turbo, PCRE2,
+  libucontext). Full attribution +
   the LGPL written offer: [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt).
 - The GStreamer plugins are **statically** linked, so LGPL §6(a) (rebuildable open app
-  source) applies. The build bundles only the runtime closure — the upstream sysroot's
-  **GPL-2.0 QEMU** frameworks are *not* shipped.
+  source) applies. The build bundles only the runtime closure, and no GPL component is
+  built at all.
 - **Distributing a built `.app`?** It already self-carries the verbatim LGPL-2.1 /
-  Apache-2.0 / OpenSSL / BSD / MIT texts at `Contents/Resources/Licenses/` (sources in
+  Apache-2.0 / BSD / MIT / ISC texts at `Contents/Resources/Licenses/` (sources in
   [`licenses/`](licenses/)), plus the LGPL §6 written offer in
   [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt). Honor those source/relink
   obligations when you redistribute.
@@ -317,17 +356,17 @@ building from source, and rebuilding to verify a download, will always stay free
 | `Packages/SpiceController` | connection lifecycle, input/clipboard glue |
 | `Sources/SpiceMac` | AppKit/Metal application |
 | `ThirdParty/CocoaSpice` | vendored Apache-2.0 fork + Proxmox patch |
-| `Frameworks/` | native SPICE frameworks (staged, git-ignored) |
+| `deps/` | pinned native sources (`sources.lock`) + patches |
+| `Sysroot/` | native SPICE stack built by `build-deps.sh` (git-ignored) |
 | `Makefile` | task runner over `scripts/` (`make help`) |
 
 ### Scripts (`scripts/` — or use the `make` target)
 
 | Script | `make` | When you'd run it |
 |--------|--------|-------------------|
-| `doctor.sh` | `doctor` | Check the build environment (Xcode, Metal toolchain, frameworks) |
-| `fetch-sysroot.sh` | `setup` | Stage the native SPICE frameworks (pinned, checksummed) |
+| `doctor.sh` | `doctor` | Check the build environment (Xcode, Metal toolchain, build tools, Sysroot) |
+| `build-deps.sh` | `setup` | Build the native SPICE stack from pinned sources into `Sysroot/` |
 | `build-app.sh` | `build` | Build + assemble `build/SpiceMac.app` |
-| `upgrade-openssl.sh` | `openssl` | Rebuild OpenSSL → 3.5.6 (only on a raw UTM sysroot) |
 | `make-icon.sh` | `icon` | Regenerate `Resources/AppIcon.icns` from `design/icon/` |
 | `debug-run.sh` | `debug VV=…` | Launch with verbose SPICE/CocoaSpice tracing |
 | `run-as-root.sh` | `root VV=…` | Launch as root for USB capture (kernel-claimed devices) |

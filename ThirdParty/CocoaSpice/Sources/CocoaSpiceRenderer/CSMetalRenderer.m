@@ -112,6 +112,7 @@ NS_ASSUME_NONNULL_END
 }
 
 @synthesize device = _device;
+@synthesize commandQueue = _commandQueue;
 @synthesize viewportOrigin = _viewportOrigin;
 @synthesize viewportScale = _viewportScale;
 
@@ -287,6 +288,11 @@ static matrix_float4x4 matrix_scale_translate(CGFloat scale, CGPoint translate)
         [self _completeDraw];
         return;
     }
+
+    // Consume the flag: every content change re-sets it via
+    // invalidateRenderSource:, so without this the view keeps re-rendering
+    // an unchanged frame on every vsync forever.
+    self.renderNeedsUpdate = NO;
 
     // synchronize with rendererQueue in order to access currentCommandBuffer
     id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];

@@ -88,8 +88,20 @@ on a rebase:
 - CocoaSpice relies on `spice_util_set_main_context()` from UTM's spice-gtk patches;
   their port to 0.43 lives in `deps/patches/spice-gtk/`.
 
+## Upstream base
+
+Vendored from utmapp/CocoaSpice **d8d29fc** (2026-09-22, "port: keep written data
+alive until SPICE sends it"); originally imported at 52b1535 (2026-02-27) and
+re-based onto d8d29fc on 2026-10-20 without conflicts. That brought in, among
+others, the per-iteration autorelease pool in `CSMain.m` (Objective-C objects
+created by SPICE callbacks were never released on the long-lived SPICE thread)
+and the `CSPort` write-buffer lifetime fix.
+
 ## Updating upstream
 
-To re-base onto a newer CocoaSpice: replace this directory with the new upstream
-tree and re-apply `../cocoaspice-proxmox.patch` (or re-add the three changes above).
+To re-base onto a newer CocoaSpice: in a clone of utmapp/CocoaSpice, check out the
+base commit above, copy this directory over it and commit ("spice-mac fork
+changes") — that commit is exactly our delta — then `git rebase` it onto the new
+upstream commit, review conflicts against the notes above, copy the result back
+and update the base commit here.
 The patch is intentionally tiny and is a good candidate to upstream as a PR.

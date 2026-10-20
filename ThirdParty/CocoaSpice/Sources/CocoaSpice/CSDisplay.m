@@ -54,6 +54,11 @@
 @property (nonatomic) CGRect visibleArea;
 @property (nonatomic, readwrite) CGSize displaySize;
 
+// GL scanout shadow buffer, see `copyScanoutRect:withCompletion:`
+@property (nonatomic, nullable) id<MTLTexture> shadowTexture;
+@property (atomic, nullable) id<MTLTexture> presentTexture;
+@property (nonatomic) BOOL shadowNeedsFullCopy;
+
 // CSRenderSource properties
 @property (nonatomic, nullable, readwrite) id<MTLTexture> canvasTexture;
 @property (nonatomic, nullable, readwrite) id<MTLTexture> glTexture;
@@ -102,6 +107,10 @@ static void cs_primary_destroy(SpiceDisplayChannel *channel, gpointer data) {
         dispatch_semaphore_wait(invalidateComplete, DISPATCH_TIME_FOREVER);
     }
     [self disableScanout];
+    // the copy is only meaningful while there is a scanout to copy, and it is
+    // a full sized private allocation we would otherwise hold onto forever
+    self.shadowTexture = nil;
+    self.presentTexture = nil;
 }
 
 static void cs_invalidate(SpiceChannel *channel,
@@ -225,16 +234,16 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
     SPICE_DEBUG("[CocoaSpice] %s",  __FUNCTION__);
 
     g_assert(self.isGLEnabled);
-    [self invalidateWithCompletion:^{
-        //spice_display_channel_gl_draw_done(channel);
+    [self copyScanoutRect:CGRectMake(x, y, w, h) withCompletion:^{
+        // `copyScanoutRect:withCompletion:` runs us on the SPICE context thread,
+        // which is both where SPICE calls have to be made and where the
+        // properties `invalidate` samples are written
+        g_assert(CSMain.sharedInstance.isCurrentContextMain);
+        // the scanout surface is ours no longer, release the server first
+        spice_display_channel_gl_draw_done(channel);
+        // present the copy whenever the display is next ready
+        [self invalidate];
     }];
-    // Ideally, we execute this in the completion to prevent tearing
-    // but in practice the added latency causes extreme stuttering
-    // and long delays as each frame is rendered serially.
-    // Long term: investigate where the bottleneck lies, introduce
-    // double/triple buffering, or move away from SPICE rendering
-    // completely (for high performance apps).
-    spice_display_channel_gl_draw_done(channel);
 }
 
 #pragma mark - Properties
@@ -245,14 +254,21 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
     }
     [CSMain.sharedInstance asyncWith:^{
         _device = device;
+        // the shadow buffer belongs to the old device
+        self.shadowTexture = nil;
+        self.presentTexture = nil;
         if (self.isGLEnabled) {
             if (self.delayedScanoutSurface) {
                 [self rebuildScanoutTextureWithSurface:self.delayedScanoutSurface width:self.delayedScanoutInfo.width height:self.delayedScanoutInfo.height];
                 self.delayedScanoutSurface = nil;
             } else {
-                if (self.glTexture) {
-                    // reuse surface from existing texture (
-                    [self rebuildScanoutTextureWithSurface:self.glTexture.iosurface width:self.glTexture.width height:self.glTexture.height];
+                IOSurfaceRef surface = self.glTexture.iosurface;
+                if (surface) {
+                    // MTLTexture.iosurface follows the get rule, but
+                    // rebuildScanoutTextureWithSurface: consumes a +1
+                    // reference, so balance it here.
+                    CFRetain(surface);
+                    [self rebuildScanoutTextureWithSurface:surface width:self.glTexture.width height:self.glTexture.height];
                 }
             }
         } else {
@@ -272,7 +288,7 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
     [CSMain.sharedInstance asyncWith:^{
         CGImageRef img = NULL;
 
-        if (self.canvasData && self.isGLEnabled) {
+        if (self.canvasData && !self.isGLEnabled) {
             CGColorSpaceRef colorSpaceRef = CGColorSpaceCreateDeviceRGB();
             CGDataProviderRef dataProviderRef = CGDataProviderCreateWithData(NULL,
                                                                              self.canvasData,
@@ -291,10 +307,16 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
                                 kCGRenderingIntentDefault);
             CGDataProviderRelease(dataProviderRef);
             CGColorSpaceRelease(colorSpaceRef);
-        } else if (self.glTexture) {
-            CIImage *ciimage = [[CIImage alloc] initWithMTLTexture:self.glTexture options:nil];
+        } else if (self.isGLEnabled && self.texture) {
+            // sample what we present rather than the scanout itself, which the
+            // server is free to overwrite as soon as a draw is acknowledged
+            CIImage *ciimage = [[CIImage alloc] initWithMTLTexture:self.texture options:nil];
+            // the scanout carries no meaningful alpha -- it is zero for every
+            // pixel and the shader ignores it (`hasAlpha` is NO), so without
+            // this the image reads as fully transparent
+            ciimage = [ciimage imageBySettingAlphaOneInExtent:ciimage.extent];
             CIImage *flipped = [ciimage imageByApplyingOrientation:kCGImagePropertyOrientationDownMirrored];
-            CIContext *cictx = [CIContext context];
+            CIContext *cictx = self.device ? [CIContext contextWithMTLDevice:self.device] : [CIContext context];
             img = [cictx createCGImage:flipped fromRect:flipped.extent];
         }
 
@@ -314,7 +336,10 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
 
 - (id<MTLTexture>)texture {
     if (self.isGLEnabled) {
-        return self.glTexture;
+        // present the shadow copy once we have one, see
+        // `copyScanoutRect:withCompletion:`
+        id<MTLTexture> presentTexture = self.presentTexture;
+        return presentTexture ?: self.glTexture;
     } else {
         return self.canvasTexture;
     }
@@ -510,15 +535,141 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
     }
 }
 
++ (MTLPixelFormat)pixelFormatForSurface:(IOSurfaceRef)surface {
+    return IOSurfaceGetPixelFormat(surface) == 'RGBA' ? MTLPixelFormatRGBA8Unorm
+                                                      : MTLPixelFormatBGRA8Unorm;
+}
+
+/// Consumes a +1 reference on `surface`.
 - (void)rebuildScanoutTextureWithSurface:(IOSurfaceRef)surface width:(NSUInteger)width height:(NSUInteger)height {
     MTLTextureDescriptor *textureDescriptor = [[MTLTextureDescriptor alloc] init];
-    textureDescriptor.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    // The surface carries its own channel order (the host picks it from the
+    // guest scanout, which is not always BGRA), so take it from the surface:
+    // wrapping RGBA bytes in a BGRA texture samples red and blue transposed.
+    textureDescriptor.pixelFormat = [CSDisplay pixelFormatForSurface:surface];
     textureDescriptor.width = width;
     textureDescriptor.height = height;
     textureDescriptor.usage = MTLTextureUsageShaderRead;
     self.canvasArea = CGRectMake(0, 0, width, height);
     self.glTexture = [self.device newTextureWithDescriptor:textureDescriptor iosurface:surface plane:0];
     CFRelease(surface);
+    [self rebuildShadowTextureWithWidth:width height:height];
+    // the damage rects that follow describe changes against the previous
+    // scanout, so the first copy out of a new one has to be whole
+    self.shadowNeedsFullCopy = YES;
+}
+
+/// Allocate the private texture the scanout is copied into. See
+/// `copyScanoutRect:withCompletion:` for why the copy exists.
+- (void)rebuildShadowTextureWithWidth:(NSUInteger)width height:(NSUInteger)height {
+    MTLPixelFormat format = self.glTexture ? self.glTexture.pixelFormat
+                                           : MTLPixelFormatBGRA8Unorm;
+    if (self.shadowTexture.width == width && self.shadowTexture.height == height &&
+        self.shadowTexture.pixelFormat == format) {
+        // the next copy overwrites it in full, so the existing allocation is
+        // still good and what we are presenting stays valid until then
+        return;
+    }
+
+    MTLTextureDescriptor *textureDescriptor = [[MTLTextureDescriptor alloc] init];
+    // copyScanoutRect blits into this, and a blit cannot convert formats
+    textureDescriptor.pixelFormat = format;
+    textureDescriptor.width = width;
+    textureDescriptor.height = height;
+    textureDescriptor.usage = MTLTextureUsageShaderRead;
+    textureDescriptor.storageMode = MTLStorageModePrivate;
+
+    // if this fails we present the scanout directly, which is correct but
+    // couples the server to our display refresh
+    self.shadowTexture = [self.device newTextureWithDescriptor:textureDescriptor];
+    self.presentTexture = nil;
+}
+
+/// Copy the shared scanout surface into a texture we own, and report when that
+/// copy has landed on the GPU.
+///
+/// The scanout IOSurface is written by the server and read by us, with
+/// `gl_draw_done` as the only handshake telling the server it may overwrite it.
+/// Acknowledging only after the frame reaches the screen would hold the server
+/// (and therefore the guest's GPU command queue) for a whole display refresh
+/// period. Taking a private copy first lets us release the surface in well
+/// under a millisecond and present from the copy whenever the display is next
+/// ready, which is both tear free and decoupled from vsync.
+///
+/// A single shadow is enough because the copy is submitted on the renderer's
+/// own queue: command buffers on a queue execute in the order they were
+/// committed, so a copy can never overwrite the texture while a render pass
+/// submitted before it is still reading.
+///
+/// Only `rect` is copied: the shadow keeps the previous frame, and `gl_draw`
+/// tells us exactly which part of the scanout changed since it. A newly
+/// allocated shadow, or a new scanout surface, has nothing to build on, so
+/// `shadowNeedsFullCopy` forces one whole copy first.
+///
+/// `completion` is always run on the SPICE context thread.
+- (void)copyScanoutRect:(CGRect)rect withCompletion:(nonnull completionCallback_t)completion {
+    g_assert(CSMain.sharedInstance.isCurrentContextMain);
+    id<MTLTexture> source = self.glTexture;
+    id<MTLTexture> destination = self.shadowTexture;
+    id<MTLCommandQueue> queue = self.renderers.firstObject.commandQueue;
+    id<MTLCommandBuffer> commandBuffer = nil;
+    id<MTLBlitCommandEncoder> blitEncoder = nil;
+
+    if (self.ready && source && destination) {
+        commandBuffer = [queue commandBuffer];
+        blitEncoder = [commandBuffer blitCommandEncoder];
+    }
+
+    if (!blitEncoder) {
+        // Either nothing can present this frame, or we have nowhere to copy it
+        // to. We must not acknowledge here and then present `glTexture`: that
+        // hands the renderer the surface the server is now free to overwrite.
+        // Going through the renderer instead holds the acknowledgement until
+        // the frame is on screen, which is what we did before the copy existed,
+        // and costs nothing when there is nothing to draw.
+        [self invalidateWithCompletion:^{
+            [CSMain.sharedInstance asyncWith:completion];
+        }];
+        return;
+    }
+
+    CGRect bounds = CGRectMake(0, 0, MIN(source.width, destination.width),
+                               MIN(source.height, destination.height));
+    CGRect damaged = self.shadowNeedsFullCopy ? bounds : CGRectIntersection(rect, bounds);
+
+    commandBuffer.label = @"Scanout Copy";
+    if (!CGRectIsEmpty(damaged)) {
+        [blitEncoder copyFromTexture:source
+                         sourceSlice:0
+                         sourceLevel:0
+                        sourceOrigin:MTLOriginMake(damaged.origin.x, damaged.origin.y, 0)
+                          sourceSize:MTLSizeMake(damaged.size.width, damaged.size.height, 1)
+                           toTexture:destination
+                    destinationSlice:0
+                    destinationLevel:0
+                   destinationOrigin:MTLOriginMake(damaged.origin.x, damaged.origin.y, 0)];
+    }
+    [blitEncoder endEncoding];
+    // later copies build on this one, and the queue keeps them in order
+    self.shadowNeedsFullCopy = NO;
+
+    [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> commandBuffer) {
+        BOOL succeeded = commandBuffer.error == nil;
+        [CSMain.sharedInstance asyncWith:^{
+            // A failed copy leaves the shadow undefined, and a copy that was
+            // still in flight when the scanout changed wrote into a shadow we
+            // have since replaced: publishing either would show a frame that
+            // never existed. The server has to be released in any case.
+            if (succeeded && destination == self.shadowTexture) {
+                // publish before the completion runs, so the invalidate it
+                // triggers picks up this frame
+                self.presentTexture = destination;
+            }
+            completion();
+        }];
+    }];
+
+    [commandBuffer commit];
 }
 
 - (void)rebuildCanvasTexture {

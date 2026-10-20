@@ -1,0 +1,142 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Er Gibbio <gibbio@pm.me>
+Date: Tue, 20 Oct 2026 14:25:56 +0200
+Subject: [PATCH 9/9] mjpeg: decode a frame ahead of its display time
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The frame at the head of the queue was decoded by the timer that fired at its
+display time, so every frame was shown late by its decode time (~5.6 ms for
+1600x745 on an M-series Mac with libjpeg-turbo), and with several streams the
+frames due at the same moment were decoded one after the other: the last ones
+were late by the sum, and when that passed their time the next frame was
+dropped as "rendering too late".
+
+Decode the head frame as soon as it is up — on the main context, from a
+zero-delay timeout so that it does not wait behind the socket sources — keep it
+in the output buffer and show it at its time. Lateness is still checked before
+decoding, so a stream that cannot keep up still sheds frames; a decoded frame is
+always shown. Only one frame is decoded ahead, so memory use is unchanged.
+
+Measured on a Windows 11 guest with four MJPEG streams (1600x745 in all), how
+late frames were shown after their time: avg 5.8 / max 12 ms before, avg 2.2 /
+max 5 ms after.
+---
+ src/channel-display-mjpeg.c | 49 ++++++++++++++++++++++++++++++-------
+ 1 file changed, 40 insertions(+), 9 deletions(-)
+
+diff --git a/src/channel-display-mjpeg.c b/src/channel-display-mjpeg.c
+index e63eb18..d79fc13 100644
+--- a/src/channel-display-mjpeg.c
++++ b/src/channel-display-mjpeg.c
+@@ -38,12 +38,14 @@ typedef struct MJpegDecoder {
+ 
+     GQueue *msgq;
+     SpiceFrame *cur_frame;
++    gboolean cur_decoded;       /* cur_frame is in out_frame, waiting for its time */
+     guint timer_id;
+ 
+     /* ---------- Output frame data ---------- */
+ 
+     uint8_t *out_frame;
+     uint32_t out_size;
++    uint32_t out_width, out_height;
+ } MJpegDecoder;
+ 
+ 
+@@ -79,6 +81,26 @@ static void mjpeg_src_term(struct jpeg_decompress_struct *cinfo)
+ static void mjpeg_decoder_schedule(MJpegDecoder *decoder);
+ 
+ /* main context */
++static gboolean mjpeg_decoder_display_frame(gpointer video_decoder)
++{
++    MJpegDecoder *decoder = (MJpegDecoder*)video_decoder;
++
++    decoder->timer_id = 0;
++    stream_display_frame(decoder->base.stream, decoder->cur_frame,
++                         decoder->out_width, decoder->out_height,
++                         SPICE_UNKNOWN_STRIDE, decoder->out_frame);
++    g_clear_pointer(&decoder->cur_frame, spice_frame_free);
++    decoder->cur_decoded = FALSE;
++
++    /* Schedule the next frame */
++    mjpeg_decoder_schedule(decoder);
++
++    return G_SOURCE_REMOVE;
++}
++
++/* main context: decode the next frame as soon as it is up, so that showing it
++ * at its time only takes the copy to the canvas — decoding then would make it
++ * late, and hold up the other streams' frames due at the same moment */
+ static gboolean mjpeg_decoder_decode_frame(gpointer video_decoder)
+ {
+     MJpegDecoder *decoder = (MJpegDecoder*)video_decoder;
+@@ -86,6 +108,7 @@ static gboolean mjpeg_decoder_decode_frame(gpointer video_decoder)
+     uint8_t *dest;
+     uint8_t *lines[4];
+ 
++    decoder->timer_id = 0;
+     jpeg_read_header(&decoder->mjpeg_cinfo, 1);
+     width = decoder->mjpeg_cinfo.image_width;
+     height = decoder->mjpeg_cinfo.image_height;
+@@ -121,6 +144,8 @@ static gboolean mjpeg_decoder_decode_frame(gpointer video_decoder)
+      */
+     if (decoder->mjpeg_cinfo.rec_outbuf_height > G_N_ELEMENTS(lines)) {
+         jpeg_abort_decompress(&decoder->mjpeg_cinfo);
++        g_clear_pointer(&decoder->cur_frame, spice_frame_free);
++        mjpeg_decoder_schedule(decoder);
+         g_return_val_if_reached(G_SOURCE_REMOVE);
+     }
+ 
+@@ -154,14 +179,11 @@ static gboolean mjpeg_decoder_decode_frame(gpointer video_decoder)
+         dest = &(decoder->out_frame[decoder->mjpeg_cinfo.output_scanline * width * 4]);
+     }
+     jpeg_finish_decompress(&decoder->mjpeg_cinfo);
++    decoder->out_width = width;
++    decoder->out_height = height;
++    decoder->cur_decoded = TRUE;
+ 
+-    /* Display the frame and dispose of it */
+-    stream_display_frame(decoder->base.stream, decoder->cur_frame,
+-                         width, height, SPICE_UNKNOWN_STRIDE, decoder->out_frame);
+-    g_clear_pointer(&decoder->cur_frame, spice_frame_free);
+-    decoder->timer_id = 0;
+-
+-    /* Schedule the next frame */
++    /* Schedule its display */
+     mjpeg_decoder_schedule(decoder);
+ 
+     return G_SOURCE_REMOVE;
+@@ -177,13 +199,21 @@ static void mjpeg_decoder_schedule(MJpegDecoder *decoder)
+ 
+     guint32 time = stream_get_time(decoder->base.stream);
+     SpiceFrame *frame = decoder->cur_frame;
++
++    if (frame != NULL && decoder->cur_decoded) {
++        /* decoded already: show it at its time, or now if that has passed */
++        guint32 d = spice_mmtime_diff(frame->mm_time, time) > 0 ? frame->mm_time - time : 0;
++        decoder->timer_id = g_spice_timeout_add(d, mjpeg_decoder_display_frame, decoder);
++        return;
++    }
+     decoder->cur_frame = NULL;
+     do {
+         if (frame) {
+             if (spice_mmtime_diff(time, frame->mm_time) <= 0) {
+-                guint32 d = frame->mm_time - time;
++                /* a timeout rather than an idle, which would wait behind the
++                 * socket sources */
+                 decoder->cur_frame = frame;
+-                decoder->timer_id = g_spice_timeout_add(d, mjpeg_decoder_decode_frame, decoder);
++                decoder->timer_id = g_spice_timeout_add(0, mjpeg_decoder_decode_frame, decoder);
+                 break;
+             }
+ 
+@@ -211,6 +241,7 @@ static void mjpeg_decoder_drop_queue(MJpegDecoder *decoder)
+         decoder->timer_id = 0;
+     }
+     g_clear_pointer(&decoder->cur_frame, spice_frame_free);
++    decoder->cur_decoded = FALSE;
+     g_queue_foreach(decoder->msgq, spice_frame_unref_func, NULL);
+     g_queue_clear(decoder->msgq);
+ }

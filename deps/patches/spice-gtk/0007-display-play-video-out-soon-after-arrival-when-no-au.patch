@@ -1,0 +1,352 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: spice-mac <spice-mac@localhost>
+Date: Tue, 20 Oct 2026 09:08:32 +0200
+Subject: [PATCH 7/9] display: play video out soon after arrival when no audio
+ is playing
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+spice-server stamps video frames with their capture time but keeps the client's
+clock MM_TIME_DELTA (400 ms) behind its own, so video can be lined up with
+buffered audio, and only ever raises that latency. With no audio playing that is
+400 ms of pure lag on every streamed region — video, but also windows dragged or
+scrolled under streaming-video=all.
+
+Unless the audio is in charge, play video out against the channel's own clock
+(monotonic time, started from the session's), with frame times shifted so that
+frames are shown SPICE_STREAM_PLAYOUT_MS (default 50) after arrival, keeping
+their relative timing: the shift is measured from the smallest slack seen, drops
+at once if a frame would be late, grows back at most 5 ms a second, and is
+measured again should the slack exceed the target by a second (the server's
+clock moved). The own clock ignores the session's, which is yanked forward when
+the audio backend reports its delay and back when the server re-sends its clock
+at the end of playback: frames queued against it would be dropped or held each
+time.
+
+The audio is in charge once the backend has reported its delay (the playback
+channel now forgets that delay when playback restarts) and playback has lasted
+2 s more, some 3-4 s into a sound: video then follows the session clock and the
+server's timestamps, for lip sync, after one pause of about the audio delay.
+Shorter sounds, such as notifications, leave the video's timing alone. When the
+audio stops, the own clock continues from the session's and the shift is
+measured again: frames still queued then have later times than the next one and
+the decoder drops them, a one-off skip. Stream reports and statistics keep the
+session clock and unshifted margins. 0 disables all of this.
+
+Measured click-to-pixel into the client's framebuffer (headless spice-glib
+client over an ssh tunnel on a LAN; Windows 11 guest, MJPEG, 1280x720 at 30 fps;
+21 samples each, median): 483 ms with this off, 128 / 154 / 185 ms at
+30 / 50 / 80. Frame delivery and its jitter were the same in all runs. With a
+2 s beep every 8 s: no decoder queue resets and a longest pause between shown
+frames of 112 ms, against 4 resets and 244 ms when the playout followed the
+session clock.
+
+Also log, once a second, the pacing of the frames actually shown and how late
+they were shown on the playout clock, and log the playout transitions.
+---
+ src/channel-display-priv.h |   9 ++
+ src/channel-display.c      | 195 +++++++++++++++++++++++++++++++++++--
+ src/channel-playback.c     |   1 +
+ 3 files changed, 199 insertions(+), 6 deletions(-)
+
+diff --git a/src/channel-display-priv.h b/src/channel-display-priv.h
+index 0bb35a0..0a1c5ec 100644
+--- a/src/channel-display-priv.h
++++ b/src/channel-display-priv.h
+@@ -138,6 +138,15 @@ struct display_stream {
+ 
+     uint32_t             playback_sync_drops_seq_len;
+ 
++    /* displayed-frame pacing, logged once a second (debug) */
++    int32_t  shown_margin;      /* margin of the last frame after playout shift */
++    gint64   shown_last;        /* µs, monotonic */
++    gint64   shown_report;
++    uint32_t shown_count;
++    double   shown_sum, shown_sumsq, shown_max;
++    double   shown_late_sum;    /* ms shown after the frame's time on the playout clock */
++    int32_t  shown_late_max;
++
+     /* playback quality report to server */
+     gboolean report_is_active;
+     uint32_t report_id;
+diff --git a/src/channel-display.c b/src/channel-display.c
+index bbc170d..0d7df71 100644
+--- a/src/channel-display.c
++++ b/src/channel-display.c
+@@ -16,6 +16,8 @@
+ */
+ #include "config.h"
+ 
++#include <math.h>
++
+ #ifdef HAVE_SYS_TYPES_H
+ #include <sys/types.h>
+ #endif
+@@ -78,6 +80,16 @@ struct _SpiceDisplayChannelPrivate {
+     GArray                      *monitors;
+     guint                       monitors_max;
+     gboolean                    enable_adaptive_streaming;
++    /* low-latency playout, see display_playout_mode() */
++    gint32                      playout_target;
++    gboolean                    playout_audio;      /* video follows the session (audio) clock */
++    gint64                      playout_audio_since;
++    gboolean                    playout_based;
++    guint32                     playout_base;       /* own clock = monotonic ms + base */
++    gboolean                    playout_valid;
++    gint32                      playout_shift;
++    gint32                      playout_window_min;
++    gint64                      playout_window_end;
+     SpiceGlScanout              scanout_ret;
+     SpiceGlScanout2             scanout;
+ };
+@@ -1068,6 +1080,11 @@ static void spice_display_channel_init(SpiceDisplayChannel *channel)
+     } else {
+         c->enable_adaptive_streaming = TRUE;
+     }
++
++    /* SPICE_STREAM_PLAYOUT_MS: how long after arrival to show a video frame when
++     * no audio is playing (0 = always follow the server's timestamps) */
++    const gchar *playout = g_getenv("SPICE_STREAM_PLAYOUT_MS");
++    c->playout_target = playout != NULL ? atoi(playout) : 50;
+ }
+ 
+ /* ------------------------------------------------------------------ */
+@@ -1540,11 +1557,26 @@ static uint32_t spice_msg_in_frame_data(SpiceMsgIn *frame_msg, uint8_t **data)
+     }
+ }
+ 
++static guint32 monotonic_ms(void)
++{
++    return g_get_monotonic_time() / 1000;
++}
++
++/* The clock video frames are played out against: the session's mm-time, or the
++ * channel's own one, see display_playout_mode() */
+ G_GNUC_INTERNAL
+ guint32 stream_get_time(display_stream *st)
+ {
+     SpiceSession *session = spice_channel_get_session(st->channel);
+-    return session ? spice_session_get_mm_time(session) : 0;
++    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(st->channel)->priv;
++
++    if (session == NULL) {
++        return 0;
++    }
++    if (c->playout_target <= 0 || c->playout_audio || !c->playout_based) {
++        return spice_session_get_mm_time(session);
++    }
++    return monotonic_ms() + c->playout_base;
+ }
+ 
+ /* coroutine or main context */
+@@ -1559,6 +1591,33 @@ G_GNUC_INTERNAL
+ void stream_display_frame(display_stream *st, SpiceFrame *frame,
+                           uint32_t width, uint32_t height, int stride, uint8_t *data)
+ {
++    gint64 now = g_get_monotonic_time();
++    int32_t late = spice_mmtime_diff(stream_get_time(st), frame->mm_time);
++    if (st->shown_last != 0) {
++        double interval = (now - st->shown_last) / 1000.0;
++        st->shown_count++;
++        st->shown_sum += interval;
++        st->shown_sumsq += interval * interval;
++        st->shown_max = MAX(st->shown_max, interval);
++        st->shown_late_sum += late;
++        st->shown_late_max = MAX(st->shown_late_max, late);
++    }
++    st->shown_last = now;
++    if (now - st->shown_report >= G_USEC_PER_SEC && st->shown_count > 0) {
++        double avg = st->shown_sum / st->shown_count;
++        CHANNEL_DEBUG(st->channel, "stream %u pacing: %u frames, interval avg %.1f sd %.1f "
++                      "max %.1f ms, margin %d ms, late avg %.1f max %d ms", st->id,
++                      st->shown_count, avg,
++                      sqrt(MAX(0.0, st->shown_sumsq / st->shown_count - avg * avg)),
++                      st->shown_max, st->shown_margin,
++                      st->shown_late_sum / st->shown_count, st->shown_late_max);
++        st->shown_count = 0;
++        st->shown_sum = st->shown_sumsq = st->shown_max = 0;
++        st->shown_late_sum = 0;
++        st->shown_late_max = G_MININT32;
++        st->shown_report = now;
++    }
++
+     if (stride == SPICE_UNKNOWN_STRIDE) {
+         stride = width * sizeof(uint32_t);
+     }
+@@ -1837,18 +1896,138 @@ void spice_frame_free(SpiceFrame *frame)
+     g_free(frame);
+ }
+ 
++#define PLAYOUT_GROW_MS 5       /* per second; far below a frame interval */
++#define PLAYOUT_RESYNC_MS 1000  /* slack this far above the target: the server's clock moved */
++#define PLAYOUT_AUDIO_HOLD (2 * G_USEC_PER_SEC)
++
++static void display_reschedule_streams(SpiceChannel *channel)
++{
++    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
++    guint i;
++
++    for (i = 0; i < c->nstreams; i++) {
++        if (c->streams[i] != NULL) {
++            c->streams[i]->video_decoder->reschedule(c->streams[i]->video_decoder);
++        }
++    }
++}
++
++/* Low-latency playout.
++ *
++ * spice-server stamps a video frame with its capture time but runs the client's
++ * clock MM_TIME_DELTA (400 ms) behind its own, so that video can be lined up with
++ * buffered audio. With no audio playing there is nothing to line up with and the
++ * 400 ms are pure lag — on every streamed region, including windows being dragged
++ * or scrolled under streaming-video=all.
++ *
++ * So, unless the audio is in charge, video is played out against the channel's
++ * own clock (monotonic time, started from the session's), with frame times
++ * shifted to show each frame `target` ms after it arrives — see
++ * display_playout_shift(). That clock ignores the session's: the session clock
++ * is yanked forward when the audio backend reports its delay and back when the
++ * server re-sends its own at the end of playback, and frames queued against it
++ * would be dropped or held each time.
++ *
++ * The audio is in charge once the backend has reported its delay and playback
++ * has lasted PLAYOUT_AUDIO_HOLD more: from then on video follows the session clock
++ * and the server's timestamps, for lip sync, after one pause of about the audio
++ * delay. Short sounds — notifications — never get there. When the audio stops,
++ * the own clock continues from the session's and the shift is measured again:
++ * frames still queued then have later times than the next one, and the decoder
++ * drops them, a one-off skip.
++ *
++ * Stream reports and statistics keep using the session clock and unshifted
++ * margins, as without this. */
++static void display_playout_mode(SpiceChannel *channel)
++{
++    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
++    SpiceSession *session = spice_channel_get_session(channel);
++    gint64 now = g_get_monotonic_time();
++    gboolean audio;
++
++    if (c->playout_target <= 0) {
++        return;
++    }
++    audio = spice_session_is_playback_active(session) &&
++            spice_session_get_playback_latency(session) > 0;
++    if (!audio) {
++        c->playout_audio_since = 0;
++    } else if (c->playout_audio_since == 0) {
++        c->playout_audio_since = now;
++    }
++    audio = audio && now - c->playout_audio_since >= PLAYOUT_AUDIO_HOLD;
++
++    if (!c->playout_based || (c->playout_audio && !audio)) {
++        c->playout_base = spice_session_get_mm_time(session) - monotonic_ms();
++        c->playout_based = TRUE;
++        c->playout_valid = FALSE;
++    }
++    if (audio != c->playout_audio) {
++        CHANNEL_DEBUG(channel, "playout: video follows %s",
++                      audio ? "the audio clock" : "its own clock");
++        c->playout_audio = audio;
++        /* the decoders' timers were set against the other clock */
++        display_reschedule_streams(channel);
++    }
++}
++
++/* How many ms to take off a frame's timestamp, given its slack on the playout
++ * clock: show it `target` ms after arrival, keeping the frames' relative timing.
++ * The shift comes from the smallest slack seen (one value per channel, as streams
++ * come and go), drops at once if a frame would otherwise be late, and only creeps
++ * back up, a few ms per second. */
++static gint32 display_playout_shift(SpiceChannel *channel, gint32 margin)
++{
++    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
++    gint64 now = g_get_monotonic_time();
++
++    if (c->playout_target <= 0 || c->playout_audio) {
++        return 0;
++    }
++    if (c->playout_valid) {
++        gint32 slack = margin - c->playout_shift;
++
++        if (slack < c->playout_target / 2) {
++            c->playout_shift = margin - c->playout_target;
++        } else if (slack > c->playout_target + PLAYOUT_RESYNC_MS) {
++            c->playout_valid = FALSE;
++        }
++    }
++    if (!c->playout_valid) {
++        c->playout_shift = margin - c->playout_target;
++        CHANNEL_DEBUG(channel, "playout: shift %d (margin %d)", c->playout_shift, margin);
++        c->playout_window_min = margin;
++        c->playout_window_end = now + G_USEC_PER_SEC;
++        c->playout_valid = TRUE;
++        return c->playout_shift;
++    }
++    c->playout_window_min = MIN(c->playout_window_min, margin);
++    if (now >= c->playout_window_end) {
++        gint32 want = c->playout_window_min - c->playout_target;
++        if (want > c->playout_shift) {
++            c->playout_shift += MIN(want - c->playout_shift, PLAYOUT_GROW_MS);
++        }
++        c->playout_window_min = G_MAXINT32;
++        c->playout_window_end = now + G_USEC_PER_SEC;
++    }
++    return c->playout_shift;
++}
++
+ /* coroutine context */
+ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+ {
+     SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+     SpiceStreamDataHeader *op = spice_msg_in_parsed(in);
+     display_stream *st = get_stream_by_id(channel, op->id);
+-    guint32 mmtime;
+-    int32_t margin, margin_report;
++    SpiceSession *session = spice_channel_get_session(channel);
++    guint32 mmtime, playout_time;
++    int32_t margin, margin_report, shift;
+     SpiceFrame *frame;
+ 
+     g_return_if_fail(st != NULL);
+-    mmtime = stream_get_time(st);
++    display_playout_mode(channel);
++    mmtime = spice_session_get_mm_time(session);
++    playout_time = stream_get_time(st);
+ 
+     if (spice_msg_in_type(in) == SPICE_MSG_DISPLAY_STREAM_DATA_SIZED) {
+         CHANNEL_DEBUG(channel, "stream %u contains sized data", op->id);
+@@ -1859,7 +2038,11 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+         op->multi_media_time = mmtime + 100; /* workaround... */
+     }
+ 
+-    margin = margin_report = op->multi_media_time - mmtime;
++    margin_report = op->multi_media_time - mmtime;
++    margin = op->multi_media_time - playout_time;
++    shift = display_playout_shift(channel, margin);
++    margin -= shift;
++    st->shown_margin = margin;
+     if (margin > 0) {
+         SpiceSession *s = spice_channel_get_session(channel);
+ 
+@@ -1874,7 +2057,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+      * decoding and best decide if/when to drop them when they are late,
+      * taking into account the impact on later frames.
+      */
+-    frame = spice_frame_new(st, in, op->multi_media_time);
++    frame = spice_frame_new(st, in, op->multi_media_time - shift);
+     if (!st->video_decoder->queue_frame(st->video_decoder, frame, margin)) {
+         destroy_stream(channel, op->id);
+         report_invalid_stream(channel, op->id);
+diff --git a/src/channel-playback.c b/src/channel-playback.c
+index aff84d4..b038acc 100644
+--- a/src/channel-playback.c
++++ b/src/channel-playback.c
+@@ -364,6 +364,7 @@ static void playback_handle_start(SpiceChannel *channel, SpiceMsgIn *in)
+     c->frame_count = 0;
+     c->last_time = start->time;
+     c->is_active = TRUE;
++    c->latency = 0;     /* unknown until the audio backend reports it */
+     c->min_latency = SPICE_PLAYBACK_DEFAULT_LATENCY_MS;
+     snd_codec_destroy(&c->codec);
+ 

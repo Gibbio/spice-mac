@@ -48,6 +48,11 @@
 @property (nonatomic) id<MTLBuffer> canvasBuffer;
 @property (nonatomic) NSUInteger canvasBufferOffset;
 @property (nonatomic) BOOL canvasIsBusy;
+// spice-mac: when the oldest change not uploaded yet arrived (SPICE thread), and
+// the once-a-second upload-wait stats
+@property (nonatomic) CFTimeInterval invalidateStamp;
+@property (nonatomic) NSUInteger uploadCount;
+@property (nonatomic) CFTimeInterval uploadWaitSum, uploadWaitMax, uploadReport;
 @property (nonatomic) CGRect canvasDirtyRect;
 
 // Other Drawing
@@ -121,6 +126,9 @@ static void cs_invalidate(SpiceChannel *channel,
     CGRect rect = CGRectIntersection(CGRectMake(x, y, w, h), self.visibleArea);
     g_assert(!self.isGLEnabled);
     if (!CGRectIsEmpty(rect)) {
+        if (self.invalidateStamp == 0) {
+            self.invalidateStamp = CACurrentMediaTime();
+        }
         if (!self.canvasIsBusy) {
             [self drawRegion:rect];
         } else {
@@ -757,10 +765,32 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
     self.numVertices = sizeof(quadVertices) / sizeof(CSRenderVertex);
 }
 
+/// spice-mac: how long changes wait for the previous frame to be drawn before
+/// they are uploaded (canvasIsBusy); SPICE thread
+- (void)recordUploadWait {
+    CFTimeInterval now = CACurrentMediaTime();
+    if (self.invalidateStamp > 0) {
+        CFTimeInterval wait = now - self.invalidateStamp;
+        self.invalidateStamp = 0;
+        self.uploadCount++;
+        self.uploadWaitSum += wait;
+        self.uploadWaitMax = MAX(self.uploadWaitMax, wait);
+    }
+    if (now - self.uploadReport >= 1.0 && self.uploadCount > 0) {
+        SPICE_DEBUG("[CocoaSpice] upload wait: %lu uploads, avg %.1f max %.1f ms",
+                    (unsigned long)self.uploadCount,
+                    1000 * self.uploadWaitSum / self.uploadCount, 1000 * self.uploadWaitMax);
+        self.uploadCount = 0;
+        self.uploadWaitSum = self.uploadWaitMax = 0;
+        self.uploadReport = now;
+    }
+}
+
 - (void)drawRegion:(CGRect)rect {
     if (!self.canvasData || !self.canvasBuffer) {
         return; // not ready to draw yet
     }
+    [self recordUploadWait];
     self.canvasIsBusy = YES;
     NSInteger pixelSize = (self.canvasFormat == SPICE_SURFACE_FMT_32_xRGB) ? 4 : 2;
     // create draw region

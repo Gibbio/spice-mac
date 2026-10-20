@@ -63,7 +63,9 @@ final class SpiceDisplayView: MTKView {
         // is always presented.
         isPaused = false
         enableSetNeedsDisplay = false
-        preferredFramesPerSecond = 60
+        // Up to ProMotion's 120 Hz; MTKView caps it at what the screen does, and a
+        // tick with nothing new to show draws nothing.
+        preferredFramesPerSecond = 120
         wantsLayer = true
         layer?.isOpaque = true
 

@@ -95,6 +95,8 @@ NS_ASSUME_NONNULL_END
 @property (nonatomic) CGFloat renderViewportScale;
 @property (nonatomic) BOOL renderNeedsUpdate;
 @property (nonatomic, readonly) NSMutableArray<completionCallback_t> *renderCompletions;
+// spice-mac: when the oldest upload not drawn yet was made, for the present stats
+@property (nonatomic) CFTimeInterval contentStamp;
 
 @end
 
@@ -109,6 +111,10 @@ NS_ASSUME_NONNULL_END
 
     // The command Queue from which we'll obtain command buffers
     id<MTLCommandQueue> _commandQueue;
+
+    // spice-mac: upload-to-screen latency, logged once a second (main thread)
+    NSUInteger _presentCount, _presentMissed;
+    CFTimeInterval _presentSum, _presentMax, _presentReport;
 }
 
 @synthesize device = _device;
@@ -203,6 +209,9 @@ NS_ASSUME_NONNULL_END
     // Save the size of the drawable as we'll pass these
     //   values to our vertex shader when we draw
     [self _setViewportCGSize:size];
+    // spice-mac: redraw at the new size; drawInMTKView: only draws when this is
+    // set, and a still guest screen sends nothing that would set it.
+    self.renderNeedsUpdate = YES;
 }
 
 - (void)setViewportOrigin:(CGPoint)viewportOrigin {
@@ -271,9 +280,52 @@ static matrix_float4x4 matrix_scale_translate(CGFloat scale, CGPoint translate)
     return m;
 }
 
+/// spice-mac: SPICE_DEBUG also turns on the present stats
+static BOOL presentStatsEnabled(void)
+{
+    static BOOL enabled;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        enabled = getenv("SPICE_DEBUG") != NULL;
+    });
+    return enabled;
+}
+
+/// spice-mac: one upload's time to the screen (negative: never shown); main thread
+- (void)_recordPresentLatency:(CFTimeInterval)latency
+{
+    CFTimeInterval now = CACurrentMediaTime();
+
+    if (latency < 0) {
+        _presentMissed++;
+    } else {
+        _presentCount++;
+        _presentSum += latency;
+        _presentMax = MAX(_presentMax, latency);
+    }
+    if (now - _presentReport >= 1.0) {
+        NSLog(@"[CocoaSpice] present: %lu frames (%lu not shown), upload to screen avg %.1f max %.1f ms",
+              (unsigned long)_presentCount, (unsigned long)_presentMissed,
+              _presentCount ? 1000 * _presentSum / _presentCount : 0, 1000 * _presentMax);
+        _presentCount = _presentMissed = 0;
+        _presentSum = _presentMax = 0;
+        _presentReport = now;
+    }
+}
+
 /// Called whenever the view needs to render a frame
 - (void)drawInMTKView:(nonnull MTKView *)view
 {
+    const _CSRendererSourceData *sourceData = self.renderSourceData;
+
+    // spice-mac: check before touching currentRenderPassDescriptor or
+    // currentDrawable, which acquire a drawable: with nothing new to show that
+    // happened on every vsync, for nothing.
+    if (!self.renderNeedsUpdate || !sourceData.isVisible) {
+        [self _completeDraw];
+        return;
+    }
+
     // Obtain a renderPassDescriptor generated from the view's drawable textures
     MTLRenderPassDescriptor *renderPassDescriptor = view.currentRenderPassDescriptor;
     id<CAMetalDrawable> currentDrawable = view.currentDrawable;
@@ -282,17 +334,21 @@ static matrix_float4x4 matrix_scale_translate(CGFloat scale, CGPoint translate)
         return;
     }
 
-    const _CSRendererSourceData *sourceData = self.renderSourceData;
-
-    if (!self.renderNeedsUpdate || !sourceData.isVisible) {
-        [self _completeDraw];
-        return;
-    }
-
     // Consume the flag: every content change re-sets it via
     // invalidateRenderSource:, so without this the view keeps re-rendering
     // an unchanged frame on every vsync forever.
     self.renderNeedsUpdate = NO;
+
+    CFTimeInterval contentStamp = self.contentStamp;
+    self.contentStamp = 0;
+    if (contentStamp > 0 && presentStatsEnabled()) {
+        [currentDrawable addPresentedHandler:^(id<MTLDrawable> drawable) {
+            CFTimeInterval presented = drawable.presentedTime;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self _recordPresentLatency:presented > 0 ? presented - contentStamp : -1];
+            });
+        }];
+    }
 
     // synchronize with rendererQueue in order to access currentCommandBuffer
     id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
@@ -353,12 +409,16 @@ static matrix_float4x4 matrix_scale_translate(CGFloat scale, CGPoint translate)
 
     [commandBuffer commit];
 
+    CFTimeInterval uploaded = CACurrentMediaTime();
     dispatch_async(dispatch_get_main_queue(), ^{
         if (completion) {
             [self _addDrawCompletion:completion];
         }
         self.renderSourceData = sourceData;
         self.renderNeedsUpdate = YES;
+        if (self.contentStamp == 0) {
+            self.contentStamp = uploaded;
+        }
     });
 }
 

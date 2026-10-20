@@ -76,6 +76,23 @@ on a rebase:
   bridge's `setData:`/`setString:` no longer clear per write, so the representations
   accumulate. (Pairs with the bridge change in
   `Packages/SpiceController/Sources/SpiceController/SpicePasteboardBridge.swift`.)
+- **`Sources/CocoaSpiceRenderer/CSMetalRenderer.m`** (`drawInMTKView:`) — checks
+  whether there is anything new to draw *before* touching `currentRenderPassDescriptor`
+  / `currentDrawable`: either one acquires a drawable, so an idle display acquired
+  one on every vsync for nothing. `mtkView:drawableSizeWillChange:` now sets
+  `renderNeedsUpdate`, so a resize redraws a still guest screen at the new size
+  (upstream's 843d652 made drawing on-change only, and a resize is not a change).
+
+## Diagnostics (spice-mac additions)
+
+With `SPICE_DEBUG` set, the time from a frame reaching CocoaSpice to the screen is
+logged once a second, in two parts:
+
+- **`Sources/CocoaSpice/CSDisplay.m`** (`recordUploadWait`) — `upload wait`: from the
+  invalidate to the upload, i.e. how long a change waits in `canvasDirtyRect` while
+  the previous frame is still being drawn (`canvasIsBusy`).
+- **`Sources/CocoaSpiceRenderer/CSMetalRenderer.m`** (`_recordPresentLatency:`) —
+  `present`: from the upload to the drawable's `presentedTime`.
 
 ## Build integration (spice-mac additions)
 

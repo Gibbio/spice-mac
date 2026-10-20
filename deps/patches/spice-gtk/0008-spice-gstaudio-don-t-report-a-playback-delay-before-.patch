@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Er Gibbio <gibbio@pm.me>
+Date: Tue, 20 Oct 2026 11:59:46 +0200
+Subject: [PATCH 8/9] spice-gstaudio: don't report a playback delay before the
+ pipeline knows it
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Playback start queries the pipeline's latency straight away, before it reaches
+PLAYING (the state change is asynchronous). The query then answers 0, not live,
+and that 0 went to spice_playback_channel_set_delay(): the session clock was set
+as if sound were heard the moment it arrives, running it ahead by the real
+output delay (220 ms with osxaudiosink). Every video frame then counted as late
+and was dropped until the next query a second or so later — a video freeze of
+about 1.4 s on every sound the guest starts, and drop reports that made the
+server cut the stream's frame rate (23 to ~7 fps over 40 s of short beeps).
+
+Only pass on a latency the pipeline reports as live. Over 40 s of 1 s beeps
+from a Windows 11 guest: 444 frames dropped as late with the original client,
+96 with this (and SPICE_STREAM_PLAYOUT_MS=0); the longest pause between shown
+frames went from ~1.7 s to ~0.26 s.
+---
+ src/spice-gstaudio.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/spice-gstaudio.c b/src/spice-gstaudio.c
+index 4f2c46e..be98bef 100644
+--- a/src/spice-gstaudio.c
++++ b/src/spice-gstaudio.c
+@@ -334,7 +334,11 @@ static gboolean update_mmtime_timeout_cb(gpointer data)
+         SPICE_DEBUG("got min latency %" GST_TIME_FORMAT ", max latency %"
+                     GST_TIME_FORMAT ", live %d", GST_TIME_ARGS (minlat),
+                     GST_TIME_ARGS (maxlat), live);
+-        spice_playback_channel_set_delay(SPICE_PLAYBACK_CHANNEL(p->pchannel), GST_TIME_AS_MSECONDS(minlat));
++        /* Until the pipeline is playing the answer is 0, as if sound were heard
++         * the moment it arrives: setting that would run the clock ahead by the
++         * real delay and make every video frame late until the next query. */
++        if (live)
++            spice_playback_channel_set_delay(SPICE_PLAYBACK_CHANNEL(p->pchannel), GST_TIME_AS_MSECONDS(minlat));
+     }
+     gst_query_unref (q);
+ 

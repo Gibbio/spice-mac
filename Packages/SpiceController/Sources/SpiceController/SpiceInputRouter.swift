@@ -175,7 +175,12 @@ public final class SpiceInputRouter {
 
     public func scrollWheel(_ event: NSEvent) {
         guard let input else { return }
-        let dy = event.scrollingDeltaY
+        // AppKit's scrollingDeltaY is how far the CONTENT moves — positive means
+        // towards the top of the document — with the user's natural-scrolling
+        // setting already applied. CSInput's convention is the reverse (negative dy
+        // is a wheel-up, i.e. towards the top), so flip it: the guest then scrolls
+        // the same way any Mac app would for the same gesture.
+        let dy = -event.scrollingDeltaY
         if event.hasPreciseScrollingDeltas {
             input.sendMouseScroll(.smooth, buttonMask: buttonMask, dy: dy)
         } else if dy < 0 {

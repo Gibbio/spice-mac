@@ -28,14 +28,18 @@ make test     # the dependency-free runners: vvcheck (.vv parser), inputcheck (k
 ```
 
 The full app needs **Xcode** + the **Metal toolchain component**
-(`xcodebuild -downloadComponent MetalToolchain`) + the native SPICE frameworks:
+(`xcodebuild -downloadComponent MetalToolchain`) + the build tools for the native
+SPICE stack (`brew install meson ninja cmake pkg-config bison`):
 
 ```sh
 make doctor   # checks the above and prints fixes if anything's missing
-make all      # fetch the sysroot, then build → build/SpiceMac.app
+make all      # build the native stack from source (~3 min), then the app → build/SpiceMac.app
 ```
 
 See [README.md](README.md) for prerequisites and details.
+
+The native libraries are pinned in `deps/sources.lock`; to move one to a new
+version (or change one of our patches to it) see [deps/README.md](deps/README.md).
 
 ### Environment variables
 
@@ -43,13 +47,7 @@ The scripts read these `SPICEMAC_*` knobs (none are needed for the default path)
 
 | Variable | Script | Default | When to set |
 |----------|--------|---------|-------------|
-| `SPICEMAC_SYSROOT_URL` | fetch-sysroot | (pinned default) | Use your own sysroot tarball |
-| `SPICEMAC_SYSROOT_SHA256` | fetch-sysroot | (pinned default) | Required digest for a custom URL |
-| `SPICEMAC_SYSROOT_FROM_GH` | fetch-sysroot | `0` | `1` = pull a fresh UTM CI artifact (needs `gh`) |
-| `SPICEMAC_SYSROOT_ARTIFACT` | fetch-sysroot | `Sysroot-macos-arm64` | UTM artifact name (GH path) |
-| `SPICEMAC_SYSROOT_ARTIFACT_ID` | fetch-sysroot | (latest) | Pin a specific UTM artifact id |
-| `SPICEMAC_UTM_REPO` | fetch-sysroot | `utmapp/UTM` | Alternate UTM repo (GH path) |
-| `SPICEMAC_SYSROOT_SHA256_INSECURE` | fetch-sysroot | unset | `1` = skip the digest check (unsafe; testing only) |
+| `SPICEMAC_DEPS_WORK` | build-deps | `.deps/` | Put the native build tree (downloads, sources, logs) elsewhere |
 | `SPICEMAC_ASSUME_YES` | run-as-root, release | unset | `1` = skip confirmation prompts |
 | `SPICEMAC_LOG` | debug-run | unset | Spice log domains (e.g. `all`) |
 | `ALLOW_NO_METAL` | build-app | unset | `1` = build a non-rendering app without the Metal toolchain |

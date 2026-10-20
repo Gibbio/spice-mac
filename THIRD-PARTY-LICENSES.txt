@@ -8,15 +8,16 @@ This file attributes the third-party components SpiceMac uses. Note the split:
   * ThirdParty/CocoaSpice/ is VENDORED in this repository (a fork — see
     ThirdParty/CocoaSpice/FORK-NOTES.md) and ships with its own LICENSE.
   * The native SPICE stack (glib, spice-gtk, gstreamer, OpenSSL, …) is NOT in
-    this repository. It is fetched at build time by scripts/fetch-sysroot.sh and,
-    in a built SpiceMac.app, bundled under Contents/Frameworks/. This source
+    this repository. It is built from pinned, checksummed upstream sources by
+    scripts/build-deps.sh (deps/sources.lock, plus the patches in deps/patches/)
+    and, in a built SpiceMac.app, bundled under Contents/Frameworks/. This source
     release does not distribute those binaries; anyone who distributes a built
     .app assumes the redistribution obligations below.
 
 Full verbatim license texts are in the `licenses/` directory of this repository
 and are copied into every built SpiceMac.app at `Contents/Resources/Licenses/`, so
-a distributed binary self-carries the LGPL-2.1, Apache-2.0, OpenSSL/SSLeay,
-BSD-3-Clause, and MIT texts together with this attribution file.
+a distributed binary self-carries the LGPL-2.1, Apache-2.0, BSD-3-Clause, MIT and
+ISC texts together with this attribution file.
 
 
 1. Vendored in this repository
@@ -32,15 +33,16 @@ CocoaSpice (fork of github.com/utmapp/CocoaSpice)
 
 The vendored Sources/CocoaSpice/ExternalHeaders/ are build-time headers for the
 LGPL libraries below (glib, gstreamer, libusb, spice) and carry their upstream
-LGPL/BSD licenses.
+LGPL/BSD licenses. (The build now compiles against the headers scripts/build-deps.sh
+installs instead; the vendored copy is no longer used.)
 
 
-2. Native libraries fetched at build time and bundled into a built .app
------------------------------------------------------------------------
+2. Native libraries built from source and bundled into a built .app
+--------------------------------------------------------------------
 
-The build bundles only the runtime closure (scripts/build-app.sh allowlist). The
-GPL-2.0 components in the upstream UTM sysroot (QEMU, spice-server, swtpm, …) are
-NOT bundled and NOT used.
+The build bundles only the runtime closure: build-app.sh embeds exactly the
+libraries the executable loads, followed recursively. No GPL component is built,
+linked or bundled.
 
 LGPL-2.1-or-later  (SPDX: LGPL-2.1-or-later) — https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
   glib, gobject, gio, gmodule .............. © GNOME / GLib contributors
@@ -49,71 +51,80 @@ LGPL-2.1-or-later  (SPDX: LGPL-2.1-or-later) — https://www.gnu.org/licenses/ol
     adder, app, audioconvert, audiorate,
     audioresample, audiotestsrc, autodetect,
     coreelements, gio, jpeg, osxaudio,
-    playback, typefindfunctions, videoconvert,
-    videofilter, videorate, videoscale,
-    videotestsrc, volume) .................. © GStreamer contributors (all LGPL; no GPL plugin is linked)
-  libsoup .................................. © GNOME / libsoup contributors
-  phodav ................................... © Red Hat, Inc.
+    playback, typefindfunctions,
+    videoconvertscale, videofilter,
+    videorate, videotestsrc, volume) ....... © GStreamer contributors (all LGPL; no GPL plugin is linked)
   json-glib ................................ © GNOME / json-glib contributors
   libusb ................................... © libusb contributors
   usbredirhost, usbredirparser ............. © Red Hat, Inc. and the usbredir project
-  GNU libintl (gettext runtime) ............ © Free Software Foundation, Inc.
-  GNU libiconv ............................. © Free Software Foundation, Inc.
 
-OpenSSL  (SPDX: OpenSSL — dual OpenSSL + original SSLeay license) — https://www.openssl.org/source/license-openssl-ssleay.txt
-  openssl 1.1.1w (libssl, libcrypto) ....... © 1998-2023 The OpenSSL Project; © 1995-1998 Eric A. Young, Tim J. Hudson
-  Required acknowledgements:
-    "This product includes software developed by the OpenSSL Project for use in
-     the OpenSSL Toolkit (http://www.openssl.org/)"
-    "This product includes cryptographic software written by Eric Young
-     (eay@cryptsoft.com)"
+LGPL-2.0-or-later  (SPDX: LGPL-2.0-or-later; distributed here under LGPL-2.1)
+  proxy-libintl (a no-op gettext stand-in,
+    statically linked into glib, json-glib
+    and spice-client-glib) ................. © 2008 Tor Lillqvist; © Frida contributors
+
+Apache-2.0  (SPDX: Apache-2.0) — https://www.apache.org/licenses/LICENSE-2.0
+  OpenSSL 3.5 LTS (libssl, libcrypto) ...... © The OpenSSL Project Authors
 
 MIT  (SPDX: MIT)
   pixman ................................... © Red Hat, Inc., SUSE, and contributors
-  libffi ................................... © Anthony Green and contributors
+  libffi (statically linked into gobject) .. © Anthony Green, Red Hat, Inc. and contributors
 
 BSD-3-Clause  (SPDX: BSD-3-Clause)
   opus ..................................... © Xiph.Org, Skype Limited, et al.
   libjpeg-turbo ............................ © D. R. Commander, the IJG, and contributors (BSD-3-Clause + IJG)
+  PCRE2 (statically linked into glib;
+    SPDX: BSD-3-Clause WITH PCRE2-exception) © University of Cambridge
+
+ISC  (SPDX: ISC)
+  libucontext (statically linked into
+    spice-client-glib) ..................... © Ariadne Conill and contributors
 
 
-3. Bundled versions (this release's sysroot)
---------------------------------------------
+3. Bundled versions
+-------------------
 
-The native libraries come from a prebuilt UTM arm64 sysroot pinned per release.
-Versions determined for the current build (the rest are recorded in, and
-recoverable from, each release's `Frameworks/`):
+Every component is built from the upstream release pinned (URL + SHA-256) in
+deps/sources.lock, with the patches in deps/patches/ applied. At the time of
+writing:
 
-  spice-client-glib (spice-gtk) .... 0.42
-  glib / gobject / gio / gmodule ... 2.69.0
-  gstreamer + base/good plugins .... 1.19.1
-  libsoup .......................... 3.x (3.6.0)
-  json-glib ........................ 1.0.x
-  opus ............................. 1.3.x
-  openssl .......................... 1.1.1w  (built by scripts/upgrade-openssl.sh)
-  libusb, usbredir, phodav, pixman, libffi, libjpeg-turbo, libintl, libiconv
-    ............................... as shipped in the pinned sysroot
+  spice-client-glib (spice-gtk) .... 0.43 + master @ 5f26179 (+ deps/patches/spice-gtk)
+  glib / gobject / gio / gmodule ... 2.88.4
+  gstreamer + base/good plugins .... 1.28.8
+  openssl .......................... 3.5.9 (LTS)
+  json-glib ........................ 1.10.8
+  opus ............................. 1.5.2
+  pixman ........................... 0.46.4
+  libjpeg-turbo .................... 3.1.4.1
+  libusb ........................... 1.0.30
+  usbredir ......................... 0.15.0
+  spice-protocol (headers) ......... 0.14.5
+  pcre2 ............................ 10.49
+  libffi ........................... 3.8.0
+  proxy-libintl .................... 0.5
+  libucontext ...................... 1.5.2
 
-The exact version of every component in a given release is fixed by the pinned,
-SHA-256-checksummed sysroot tarball (`SPICEMAC_SYSROOT_URL`/`_SHA256`,
-scripts/fetch-sysroot.sh) plus scripts/upgrade-openssl.sh.
+deps/sources.lock is authoritative; the list above is a convenience copy.
 
 
 4. LGPL-2.1 — notices and §6 written offer
 ------------------------------------------
 
-The LGPL-2.1+ libraries above are used as dynamically-linked frameworks; the
-GStreamer base/good plugins are statically linked into the SpiceMac executable.
-A distributed SpiceMac.app therefore carries, under `Contents/Resources/Licenses/`,
-a copy of the LGPL-2.1 license text and this notice (LGPL-2.1 §6 / §1).
+The LGPL-2.1+ libraries above are used as dynamically-linked libraries; the
+GStreamer base/good plugins are statically linked into the SpiceMac executable,
+and proxy-libintl is statically linked into the (themselves LGPL) glib, json-glib
+and spice-client-glib libraries. A distributed SpiceMac.app therefore carries,
+under `Contents/Resources/Licenses/`, a copy of the LGPL-2.1 license text and this
+notice (LGPL-2.1 §6 / §1).
 
 Relinking with a modified library is supported and documented: SpiceMac is fully
 open source (MIT). A recipient of a binary can rebuild it against their own
-modified LGPL library — replace the relevant `.framework` under
+modified LGPL library — replace the relevant `.dylib` under
 `Contents/Frameworks/` (dynamic libraries) or rebuild from source with a modified
 static archive (the statically-linked gst plugins) and re-run
 `scripts/build-app.sh`, then re-sign. The complete build recipe is in the repo
-(Package.swift, scripts/build-app.sh). This provides the §6(b)/§6(a) relink path.
+(deps/, scripts/build-deps.sh, Package.swift, scripts/build-app.sh). This provides
+the §6(b)/§6(a) relink path.
 
 WRITTEN OFFER (valid to any third party). For at least three (3) years from the
 date you received a given SpiceMac binary, the maintainer will provide, to any
@@ -122,8 +133,7 @@ LGPL-2.1+ libraries it bundles, for the exact versions in that release, for a
 charge no more than the cost of physically performing source distribution.
 Request it by opening an issue at https://github.com/Ching367436/spice-mac (or
 contacting the maintainer via GitHub). Upstream sources for these versions are
-also publicly available from the GNOME (glib, gio, json-glib, libsoup), GStreamer,
-freedesktop.org / SPICE (spice-gtk, usbredir, phodav, pixman), libusb, and GNU
-(gettext/libintl, libiconv) projects.
+also publicly available at the URLs pinned in deps/sources.lock (GNOME, GStreamer,
+freedesktop.org / SPICE, libusb and GitHub projects).
 
 For any other licensing question, open an issue at the URL above.

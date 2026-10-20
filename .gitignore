@@ -2,8 +2,6 @@
 .swiftpm/
 DerivedData/
 *.xcodeproj/xcuserdata/
-Frameworks/*
-!Frameworks/.gitkeep
 # ThirdParty/CocoaSpice is a vendored Apache-2.0 fork (committed). Ignore only its build output.
 ThirdParty/CocoaSpice/.build/
 *.app
@@ -14,3 +12,6 @@ Package.resolved
 .claude/
 # Never commit a connection file — it carries a live ticket + CA.
 *.vv
+# Native deps built from source by scripts/build-deps.sh (work dir + installed prefix).
+/.deps/
+/Sysroot/

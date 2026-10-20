@@ -1,0 +1,233 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: osy <osy@turing.llc>
+Date: Fri, 4 Mar 2022 16:35:26 -0800
+Subject: [PATCH 1/9] spice-util: support for non-default GMainContext
+
+When spice-gtk is used in an application with its own GMainContext, the
+wrong context will be used leading to various issues.
+
+https://developer-old.gnome.org/programming-guidelines/stable/main-contexts.html.en
+
+We add a new API spice_util_set_main_context() which allows the caller
+to pass in the main context for a main loop that the caller controls and
+is responsible for.
+
+[spice-mac: ported from UTM patches/spice-gtk-0.42.patch to 0.43]
+---
+ src/map-file-glib     |   1 +
+ src/spice-util-priv.h |   8 +++
+ src/spice-util.c      | 160 ++++++++++++++++++++++++++++++++++++++++++
+ src/spice-util.h      |   2 +
+ 4 files changed, 171 insertions(+)
+
+diff --git a/src/map-file-glib b/src/map-file-glib
+index 24b3859..1aff6a8 100644
+--- a/src/map-file-glib
++++ b/src/map-file-glib
+@@ -175,6 +175,7 @@ spice_usbredir_channel_get_type;
+ spice_util_get_debug;
+ spice_util_get_version_string;
+ spice_util_set_debug;
++spice_util_set_main_context;
+ spice_uuid_to_string;
+ spice_webdav_channel_get_type;
+ local:
+diff --git a/src/spice-util-priv.h b/src/spice-util-priv.h
+index 98389f7..e156469 100644
+--- a/src/spice-util-priv.h
++++ b/src/spice-util-priv.h
+@@ -30,5 +30,13 @@ gchar* spice_unix2dos(const gchar *str, gssize len);
+ gchar* spice_dos2unix(const gchar *str, gssize len);
+ void spice_mono_edge_highlight(unsigned width, unsigned hight,
+                                const guint8 *and, const guint8 *xor, guint8 *dest);
++GMainContext *spice_main_context(void);
++guint g_spice_timeout_add(guint interval, GSourceFunc function, gpointer data);
++guint g_spice_timeout_add_seconds(guint interval, GSourceFunc function, gpointer data);
++guint g_spice_timeout_add_full(gint priority, guint interval, GSourceFunc function,
++                               gpointer data, GDestroyNotify notify);
++guint g_spice_idle_add(GSourceFunc function, gpointer data);
++guint g_spice_child_watch_add(GPid pid, GChildWatchFunc function, gpointer data);
++gboolean g_spice_source_remove(guint tag);
+ 
+ G_END_DECLS
+diff --git a/src/spice-util.c b/src/spice-util.c
+index a92e696..ebd3c31 100644
+--- a/src/spice-util.c
++++ b/src/spice-util.c
+@@ -346,3 +346,163 @@ void spice_mono_edge_highlight(unsigned width, unsigned height,
+         xor += bpl;
+     }
+ }
++
++static GMainContext *spice_context = NULL;
++
++/**
++ * spice_util_set_main_context:
++ * @context: Main context for SPICE
++ *
++ * Main context for events and sources. This must be called first if the
++ * application uses multiple GLib based libraries. In that case, the
++ * caller is responsible for setting up a separate main context and main loop
++ * for SPICE. The context will be retained. To prevent memory leaks,
++ * spice_util_set_main_context(NULL) should be called when finished which sets
++ * the main context back to the default.
++ *
++ * Since: 0.41
++ **/
++void spice_util_set_main_context(GMainContext *context)
++{
++    if (spice_context) {
++        g_main_context_unref(spice_context);
++    }
++    spice_context = context;
++    if (spice_context) {
++        g_main_context_ref(spice_context);
++    }
++}
++
++/**
++ * spice_main_context:
++ *
++ * Returns: either the main context set by spice_util_set_main_context() or
++ * NULL indicating the default main context.
++ *
++ * Since: 0.41
++ **/
++G_GNUC_INTERNAL
++GMainContext *spice_main_context(void)
++{
++    return spice_context;
++}
++
++G_GNUC_INTERNAL
++guint
++g_spice_timeout_add(guint interval,
++                    GSourceFunc function,
++                    gpointer data)
++{
++    return g_spice_timeout_add_full(G_PRIORITY_DEFAULT, 
++                 interval, function, data, NULL);
++}
++
++G_GNUC_INTERNAL
++guint
++g_spice_timeout_add_seconds(guint interval,
++                            GSourceFunc function,
++                            gpointer data)
++{
++    GSource *source = NULL;
++    GMainContext *context;
++    guint id;
++
++    g_return_val_if_fail(function != NULL, 0);
++
++    context = spice_main_context();
++
++    source = g_timeout_source_new_seconds(interval);
++    g_source_set_callback(source, function, data, NULL);
++    id = g_source_attach(source, context);
++    g_source_unref(source);
++
++    return id;
++}
++
++G_GNUC_INTERNAL
++guint
++g_spice_timeout_add_full (gint priority,
++                          guint interval,
++                          GSourceFunc function,
++                          gpointer data,
++                          GDestroyNotify notify)
++{
++    GSource *source;
++    GMainContext *context;
++    guint id;
++
++    g_return_val_if_fail(function != NULL, 0);
++
++    context = spice_main_context();
++    source = g_timeout_source_new(interval);
++
++    if (priority != G_PRIORITY_DEFAULT)
++        g_source_set_priority(source, priority);
++
++    g_source_set_callback(source, function, data, notify);
++    id = g_source_attach(source, context);
++
++    g_source_unref(source);
++
++    return id;
++}
++
++G_GNUC_INTERNAL
++guint
++g_spice_idle_add(GSourceFunc function,
++                 gpointer data)
++{
++    GSource *source = NULL;
++    GMainContext *context;
++    guint id;
++
++    g_return_val_if_fail(function != NULL, 0);
++
++    context = spice_main_context();
++
++    source = g_idle_source_new();
++    g_source_set_callback(source, function, data, NULL);
++    id = g_source_attach(source, context);
++    g_source_unref(source);
++
++    return id;
++}
++
++G_GNUC_INTERNAL
++guint
++g_spice_child_watch_add(GPid pid,
++                        GChildWatchFunc function,
++                        gpointer data)
++{
++    GSource *source = NULL;
++    GMainContext *context;
++    guint id;
++
++    g_return_val_if_fail(function != NULL, 0);
++
++    context = spice_main_context();
++
++    source = g_child_watch_source_new(pid);
++    g_source_set_callback(source, (GSourceFunc) function, data, NULL);
++    id = g_source_attach(source, context);
++    g_source_unref(source);
++
++    return id;
++}
++
++G_GNUC_INTERNAL
++gboolean
++g_spice_source_remove(guint tag)
++{
++    GSource *source;
++
++    g_return_val_if_fail(tag > 0, FALSE);
++
++    source = g_main_context_find_source_by_id(spice_main_context(), tag);
++    if (source)
++        g_source_destroy(source);
++    else
++        g_critical("Source ID %u was not found when attempting to remove it", tag);
++
++    return source != NULL;
++}
+diff --git a/src/spice-util.h b/src/spice-util.h
+index 33f2ded..4d97937 100644
+--- a/src/spice-util.h
++++ b/src/spice-util.h
+@@ -42,6 +42,8 @@ gulong spice_g_signal_connect_object(gpointer instance,
+                                      GConnectFlags connect_flags);
+ SPICE_GTK_DEPRECATED_IN_0_43_FOR(spice_glib_uuid_to_string)
+ gchar* spice_uuid_to_string(const guint8 uuid[16]);
++SPICE_GTK_AVAILABLE_IN_ALL
++void spice_util_set_main_context(GMainContext *context);
+ 
+ SPICE_GTK_AVAILABLE_IN_0_43
+ gulong spice_glib_signal_connect_object(gpointer instance,

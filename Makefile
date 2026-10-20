@@ -7,16 +7,16 @@ export DEVELOPER_DIR
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor setup build run test all openssl icon debug root release check-version clean distclean
+.PHONY: help doctor setup build run test all icon debug root release check-version clean distclean
 
 help: ## Show this help
 	@awk 'BEGIN{FS=":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36m%-14s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 
-doctor: ## Check the build environment (Xcode, Metal toolchain, frameworks)
+doctor: ## Check the build environment (Xcode, Metal toolchain, build tools, Sysroot)
 	@./scripts/doctor.sh
 
-setup: ## Stage the native SPICE frameworks (pinned, checksummed sysroot)
-	@./scripts/fetch-sysroot.sh
+setup: ## Build the native SPICE stack from pinned, checksummed sources into Sysroot/
+	@./scripts/build-deps.sh
 
 build: ## Build and assemble build/SpiceMac.app
 	@./scripts/build-app.sh
@@ -29,10 +29,7 @@ test: ## Run the dependency-free check runners (vvcheck + inputcheck + scalechec
 	@( cd Packages/SpiceInputMap && swift run inputcheck )
 	@( cd Packages/DisplayScale && swift run scalecheck )
 
-all: doctor setup build ## Doctor, fetch the sysroot, and build (first-time setup)
-
-openssl: ## Upgrade the bundled OpenSSL (only needed on a raw UTM sysroot)
-	@./scripts/upgrade-openssl.sh
+all: doctor setup build ## Doctor, build the native stack, and build the app (first-time setup)
 
 icon: ## Regenerate Resources/AppIcon.icns from design/icon/source.png
 	@./scripts/make-icon.sh
@@ -53,5 +50,5 @@ check-version: ## Assert Info.plist / CHANGELOG / tag versions agree
 clean: ## Remove build output (build/)
 	@rm -rf build/ && echo "removed build/"
 
-distclean: clean ## Also remove the staged native frameworks (Frameworks/)
-	@find Frameworks -mindepth 1 ! -name '.gitkeep' -maxdepth 1 -exec rm -rf {} + && echo "removed Frameworks/*"
+distclean: clean ## Also remove the native stack (Sysroot/) and its build tree (.deps/)
+	@rm -rf Sysroot/ .deps/ && echo "removed Sysroot/ and .deps/"

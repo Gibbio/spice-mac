@@ -11,7 +11,7 @@ verification of every finding).
   display / cursor / clipboard / agent data to the client.
 - **A crafted `.vv` file** the user opens.
 - **Local**: the `.vv` carries a short-lived ticket + CA; the app can run as root
-  for USB; ad-hoc signing; the bundled native stack is an old UTM sysroot.
+  for USB; ad-hoc signing; the bundled native stack is built from pinned upstream sources.
 
 ## Overall posture
 
@@ -46,40 +46,22 @@ gate any wider distribution.
   values (a `NUL` would otherwise truncate the value inside the C SPICE stack),
   and range-checks ports. A deterministic 20k-iteration fuzzer + edge-case tests
   (`swift run vvcheck`) assert it never crashes on arbitrary input.
-- **Mandatory sysroot integrity** — `fetch-sysroot.sh` downloads a **pinned,
-  SHA-256-checksummed** sysroot by default and refuses any URL download whose digest
-  doesn't match (a custom `SPICEMAC_SYSROOT_URL` still requires `SPICEMAC_SYSROOT_SHA256`).
-- **OpenSSL upgraded to 3.5.6 (LTS, maintained to 2030)** — `scripts/upgrade-openssl.sh`
-  builds OpenSSL 3.5 from (SHA-256-verified) source and installs it under the old
-  `ssl.1.1`/`crypto.1.1` names (a "masquerade"), so spice-gtk — compiled against
-  1.1.1 — loads it without a rebuild. Safe here because all ~72 OpenSSL symbols
-  spice-client-glib imports are stable public-API functions present in 3.x (no data
-  symbols; spice-gtk uses opaque pointers), and the script **verifies every one
-  resolves** before swapping. This retires the EOL 1.1.1 branch entirely (previously
-  1.1.1w, which only fixed CVE-2022-0778 up to its EOL). The pinned default sysroot
-  ships 3.5.6, so a fresh build is current without the extra step.
+- **Pinned, fail-closed native build** — `scripts/build-deps.sh` builds the whole
+  native stack from upstream sources pinned by URL + SHA-256 in `deps/sources.lock`
+  and aborts on any mismatch. Meson may not fetch subprojects on its own, nothing may
+  be found or linked from Homebrew, and a final check rejects any library that
+  references a path outside `@rpath` or the OS. Patches on top of upstream live,
+  reviewable, in `deps/patches/`.
+- **Current OpenSSL, built natively** — OpenSSL 3.5 LTS (maintained to 2030) is built
+  from source like the rest of the stack, and spice-gtk is compiled against it.
 
 ## Residual risks (not fixed in code)
 
-1. **Native stack age (the exposed parts are current; gstreamer/glib lag).** The two
-   most server-exposed native libraries are up to date: **spice-gtk 0.42 is the
-   latest upstream release** (it does the SPICE protocol parsing, TLS, and display),
-   and **OpenSSL is on the supported 3.5 LTS branch** (the masquerade in
-   `upgrade-openssl.sh`, baked into the pinned sysroot). The genuinely old pieces are
-   lower-priority and hard to move:
-   - **gstreamer 1.19.1** (audio/video decode). UTM pins this exact version and ships
-     no newer one, so a sysroot refresh wouldn't help; moving to 1.24+ means building
-     it ourselves, and the 1.19→1.24 API jump risks breaking the CocoaSpice audio
-     path. Deferred as poor ROI — audio decode is a narrower surface than TLS/protocol
-     and only active when the guest has a SPICE audio device.
-   - **glib ~2.69** (general runtime; the SPICE protocol parsing is in spice-gtk, not
-     glib). A newer UTM sysroot would bump it to ~2.83, but it's a lower-risk
-     component, the target is a dev version, and the migration (header/ABI jump,
-     re-verify the fork, re-test) isn't free. Deferred.
-
-   **Net:** the high-exposure surface (spice-gtk + OpenSSL) is current; the residual
-   is older gstreamer/glib — lower-priority and either un-updatable via UTM or
-   low-ROI. Revisit if a known server-reachable CVE lands in those.
+1. **Native stack age — resolved by building from source.** Every native library is
+   now a current upstream release (spice-gtk 0.43, glib 2.88, GStreamer 1.28,
+   OpenSSL 3.5 LTS — see `deps/sources.lock`), replacing the UTM sysroot's glib ~2.69
+   and GStreamer 1.19.1 development snapshot. What remains is keeping the pins
+   current: bump a package in `deps/sources.lock` when upstream ships a security fix.
 
 2. **Running as root for USB.** `scripts/run-as-root.sh` runs the *entire* app —
    including the SPICE/TLS/glib/gstreamer/clipboard/agent parsers that consume

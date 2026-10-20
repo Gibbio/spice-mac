@@ -7,11 +7,11 @@ notices travel **with** any distributed binary.
 
 | File | Covers |
 |------|--------|
-| `LGPL-2.1.txt` | glib, gobject, gio, gmodule, spice-client-glib (spice-gtk), the GStreamer libraries + statically-linked base/good plugins, libsoup, phodav, json-glib, libusb, usbredirhost, usbredirparser, GNU libintl, GNU libiconv |
-| `Apache-2.0.txt` | CocoaSpice (vendored fork) |
-| `OpenSSL-1.1.1.txt` | OpenSSL 1.1.1w (libssl, libcrypto) — dual OpenSSL / original SSLeay license |
-| `BSD-3-Clause.txt` | opus, libjpeg-turbo |
+| `LGPL-2.1.txt` | glib, gobject, gio, gmodule, spice-client-glib (spice-gtk), the GStreamer libraries + statically-linked base/good plugins, json-glib, libusb, usbredirhost, usbredirparser, proxy-libintl (LGPL-2.0-or-later, used under 2.1) |
+| `Apache-2.0.txt` | CocoaSpice (vendored fork), OpenSSL 3.5 (libssl, libcrypto) |
+| `BSD-3-Clause.txt` | opus, libjpeg-turbo, PCRE2 |
 | `MIT.txt` | pixman, libffi |
+| `ISC.txt` | libucontext |
 
 Attribution, SPDX identifiers, exact versions, and the LGPL §6 source offer are in
 [`../THIRD-PARTY-LICENSES.txt`](../THIRD-PARTY-LICENSES.txt). SpiceMac's own code is

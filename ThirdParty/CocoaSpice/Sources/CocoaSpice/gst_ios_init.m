@@ -32,14 +32,12 @@ GST_PLUGIN_STATIC_DECLARE(gio);
 #if defined(GST_IOS_PLUGIN_TYPEFINDFUNCTIONS) || defined(GST_IOS_PLUGINS_CORE)
 GST_PLUGIN_STATIC_DECLARE(typefindfunctions);
 #endif
-#if defined(GST_IOS_PLUGIN_VIDEOCONVERT) || defined(GST_IOS_PLUGINS_CORE)
-GST_PLUGIN_STATIC_DECLARE(videoconvert);
+// spice-mac: GStreamer 1.22 merged videoconvert + videoscale into videoconvertscale.
+#if defined(GST_IOS_PLUGIN_VIDEOCONVERTSCALE) || defined(GST_IOS_PLUGINS_CORE)
+GST_PLUGIN_STATIC_DECLARE(videoconvertscale);
 #endif
 #if defined(GST_IOS_PLUGIN_VIDEORATE) || defined(GST_IOS_PLUGINS_CORE)
 GST_PLUGIN_STATIC_DECLARE(videorate);
-#endif
-#if defined(GST_IOS_PLUGIN_VIDEOSCALE) || defined(GST_IOS_PLUGINS_CORE)
-GST_PLUGIN_STATIC_DECLARE(videoscale);
 #endif
 #if defined(GST_IOS_PLUGIN_VIDEOTESTSRC) || defined(GST_IOS_PLUGINS_CORE)
 GST_PLUGIN_STATIC_DECLARE(videotestsrc);
@@ -538,14 +536,11 @@ gst_ios_init (void)
 #if defined(GST_IOS_PLUGIN_TYPEFINDFUNCTIONS) || defined(GST_IOS_PLUGINS_CORE)
     GST_PLUGIN_STATIC_REGISTER(typefindfunctions);
 #endif
-#if defined(GST_IOS_PLUGIN_VIDEOCONVERT) || defined(GST_IOS_PLUGINS_CORE)
-    GST_PLUGIN_STATIC_REGISTER(videoconvert);
+#if defined(GST_IOS_PLUGIN_VIDEOCONVERTSCALE) || defined(GST_IOS_PLUGINS_CORE)
+    GST_PLUGIN_STATIC_REGISTER(videoconvertscale);
 #endif
 #if defined(GST_IOS_PLUGIN_VIDEORATE) || defined(GST_IOS_PLUGINS_CORE)
     GST_PLUGIN_STATIC_REGISTER(videorate);
-#endif
-#if defined(GST_IOS_PLUGIN_VIDEOSCALE) || defined(GST_IOS_PLUGINS_CORE)
-    GST_PLUGIN_STATIC_REGISTER(videoscale);
 #endif
 #if defined(GST_IOS_PLUGIN_VIDEOTESTSRC) || defined(GST_IOS_PLUGINS_CORE)
     GST_PLUGIN_STATIC_REGISTER(videotestsrc);

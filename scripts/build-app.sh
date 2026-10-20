@@ -5,7 +5,7 @@
 # Requirements:
 #   * Full Xcode (the Metal toolchain compiles CocoaSpice's shader; Command Line
 #     Tools alone cannot build the app).
-#   * Native SPICE frameworks staged under ./Frameworks (run scripts/fetch-sysroot.sh).
+#   * The native SPICE stack built into ./Sysroot (run scripts/build-deps.sh).
 #
 # Environment overrides:
 #   CONFIG=release|debug            (default: release)
@@ -44,25 +44,9 @@ if [ "${ALLOW_NO_METAL:-0}" != "1" ] && ! xcrun -sdk macosx metal --version >/de
 fi
 
 shopt -s nullglob
-# Only the frameworks the client actually loads (the runtime closure, computed via
-# `otool -L` over the built binary). This DELIBERATELY excludes the rest of the UTM
-# sysroot — most importantly the GPL-2.0 QEMU frameworks (qemu-*-softmmu, qemu-img)
-# plus spice-server, swtpm, virglrenderer, slirp, MoltenVK/vulkan/epoxy — which the
-# SPICE *client* never loads and which would attach GPL obligations (and ~390 MB of
-# dead weight) to the distributed .app. Re-verify after changing with:
-#   otool -L build/SpiceMac.app/Contents/MacOS/SpiceMac  (and recurse over frameworks)
-RUNTIME_FRAMEWORKS=(
-    glib-2.0.0 gobject-2.0.0 gio-2.0.0 gmodule-2.0.0 ffi.8 intl.8 iconv.2
-    spice-client-glib-2.0.8
-    gstreamer-1.0.0 gstbase-1.0.0 gstapp-1.0.0 gstaudio-1.0.0 gstvideo-1.0.0
-    gstpbutils-1.0.0 gsttag-1.0.0
-    phodav-3.0.0 soup-3.0.0
-    usb-1.0.0 usbredirhost.1 usbredirparser.1
-    json-glib-1.0.0 pixman-1.0 jpeg.62 opus.0
-    crypto.1.1 ssl.1.1
-)
-[ -d "Frameworks/glib-2.0.0.framework" ] \
-    || die "Frameworks/ not staged — run scripts/fetch-sysroot.sh first."
+SYSROOT_LIB="$ROOT/Sysroot/lib"
+[ -f "$SYSROOT_LIB/libspice-client-glib-2.0.dylib" ] \
+    || die "Sysroot/ not built — run scripts/build-deps.sh first."
 
 # --- Build -----------------------------------------------------------------
 log "swift build -c $CONFIG"
@@ -93,13 +77,21 @@ done
 # newDefaultLibraryWithBundle: needs it, or the display cannot render.
 RENDERER_DIR="$ROOT/ThirdParty/CocoaSpice/Sources/CocoaSpiceRenderer"
 RES_BUNDLE="$APP/Contents/Resources/CocoaSpice_CocoaSpiceRenderer.bundle"
+# Newer SwiftPM (the Swift Build backend, Xcode 27+) emits a macOS-layout bundle
+# (Contents/Info.plist + Contents/Resources/) and already compiles the shader; older
+# SwiftPM emits a flat bundle holding the raw .metal. Write into whichever layout we
+# got — files at the root of a Contents/-layout bundle are unsealed and codesign
+# refuses to sign it.
+RES_DIR="$RES_BUNDLE"
+[ -d "$RES_BUNDLE/Contents" ] && RES_DIR="$RES_BUNDLE/Contents/Resources"
 if [ -f "$RENDERER_DIR/CSShaders.metal" ] && [ -d "$RES_BUNDLE" ]; then
     log "compiling Metal shader → default.metallib"
+    mkdir -p "$RES_DIR"
     if xcrun -sdk macosx metal -I "$RENDERER_DIR" -c "$RENDERER_DIR/CSShaders.metal" -o "$WORK/CSShaders.air" 2>"$WORK/metal.log" \
-       && xcrun -sdk macosx metallib "$WORK/CSShaders.air" -o "$RES_BUNDLE/default.metallib" 2>>"$WORK/metal.log"; then
-        rm -f "$RES_BUNDLE/CSShaders.metal"        # raw source not needed at runtime
-        # Minimal Info.plist so it is a valid, signable bundle.
-        cat > "$RES_BUNDLE/Info.plist" <<PLIST
+       && xcrun -sdk macosx metallib "$WORK/CSShaders.air" -o "$RES_DIR/default.metallib" 2>>"$WORK/metal.log"; then
+        rm -f "$RES_DIR/CSShaders.metal"        # raw source not needed at runtime
+        # Minimal Info.plist so it is a valid, signable bundle (SwiftPM's own, if any, wins).
+        [ -f "$RES_BUNDLE/Contents/Info.plist" ] || cat > "$RES_BUNDLE/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -121,12 +113,22 @@ else
     log "WARNING: renderer shader not found; display rendering may not work"
 fi
 
-# Native SPICE frameworks — allowlist only (see RUNTIME_FRAMEWORKS above).
-for name in "${RUNTIME_FRAMEWORKS[@]}"; do
-    fw="Frameworks/$name.framework"
-    [ -d "$fw" ] || die "missing required framework: $fw (re-run fetch-sysroot.sh)"
-    cp -R "$fw" "$APP/Contents/Frameworks/"
+# Native SPICE libraries — exactly the runtime closure: every @rpath dylib the
+# executable loads, followed recursively through the libraries themselves. Anything
+# in Sysroot/ that nothing loads (build-time tools, static archives) stays out, so
+# what ships is what runs. Each is copied under its install name (the soname).
+log "embedding the native library closure"
+queue=("$APP/Contents/MacOS/$APP_NAME")
+while [ ${#queue[@]} -gt 0 ]; do
+    image="${queue[0]}"; queue=("${queue[@]:1}")
+    for dep in $(otool -L "$image" | awk 'NR > 1 && $1 ~ /^@rpath\// { print substr($1, 8) }'); do
+        [ -e "$APP/Contents/Frameworks/$dep" ] && continue
+        [ -e "$SYSROOT_LIB/$dep" ] || die "missing runtime library: $dep (re-run build-deps.sh)"
+        cp -L "$SYSROOT_LIB/$dep" "$APP/Contents/Frameworks/$dep"
+        queue+=("$APP/Contents/Frameworks/$dep")
+    done
 done
+log "  $(ls "$APP/Contents/Frameworks" | wc -l | tr -d ' ') libraries"
 
 # --- License notices -------------------------------------------------------
 # A distributed binary must carry the LGPL-2.1/Apache-2.0/OpenSSL/BSD/MIT texts and
@@ -165,12 +167,11 @@ if [ "${HARDENED:-0}" = "1" ]; then
     APP_SIGN_ARGS+=(--options runtime --entitlements "$ROOT/Resources/$APP_NAME.entitlements")
 fi
 
-log "signing frameworks (identity: $SIGN_IDENTITY)"
-# Sign nested code first (deepest first), then the app.
-find "$APP/Contents/Frameworks" -type d -name "*.framework" -print0 |
-    while IFS= read -r -d '' fw; do
-        codesign "${SIGN_ARGS[@]}" "$fw" 2>/dev/null || codesign "${SIGN_ARGS[@]}" "$fw"
-    done
+log "signing libraries (identity: $SIGN_IDENTITY)"
+# Sign nested code first, then the app.
+for lib in "$APP/Contents/Frameworks/"*.dylib; do
+    codesign "${SIGN_ARGS[@]}" "$lib"
+done
 for bundle in "$APP/Contents/Resources/"*.bundle; do
     [ -e "$bundle" ] && codesign "${SIGN_ARGS[@]}" "$bundle"
 done
@@ -185,8 +186,8 @@ log "done → $APP"
 log "run with: open \"$APP\"   (or pass a file: open -a \"$APP\" connection.vv)"
 
 # --- Package for distribution ----------------------------------------------
-# Use ditto (NOT plain zip): the bundle has ~78 symlinks (framework Versions/Current
-# links) and nested ad-hoc code signatures that plain zip mangles. Publish the
+# Use ditto (NOT plain zip): it keeps the nested ad-hoc code signatures and
+# extended attributes that plain zip mangles. Publish the
 # SHA-256 in the release notes — for an unsigned/un-notarized download it is the
 # only integrity signal users get.
 if [ "${PACKAGE:-1}" = "1" ]; then

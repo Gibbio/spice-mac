@@ -7,36 +7,32 @@ import PackageDescription
 // BUILD REQUIREMENTS:
 //  * Full Xcode (not just Command Line Tools): CocoaSpice's renderer compiles a
 //    .metal shader, which needs the Metal toolchain that only ships with Xcode.
-//  * The native SPICE frameworks must be staged under ./Frameworks first:
-//        ./scripts/fetch-sysroot.sh
+//  * The native SPICE stack must be built into ./Sysroot first:
+//        ./scripts/build-deps.sh
 //  * Build & bundle into SpiceMac.app with:  ./scripts/build-app.sh
 //
 // The pure-Swift libraries (VVConfig, SpiceInputMap) build and test on their own
 // with just the toolchain — see their packages under Packages/.
 
-// The native SPICE stack is linked as @rpath-relocatable *.framework bundles from
-// the UTM sysroot (staged into ./Frameworks by scripts/fetch-sysroot.sh). UTM's
-// lib/*.dylib are NOT relocatable (absolute CI install names), so we link the
-// frameworks and embed them with @rpath. The version suffixes below track the
-// sysroot's framework versions — update them if you fetch a different sysroot.
-// Transitive deps (intl, pixman, openssl, opus, json-glib, …) load at runtime via
-// @rpath from the embedded frameworks, so only the directly-referenced ones are
-// listed here.
-let spiceFrameworks = [
-    "glib-2.0.0", "gobject-2.0.0", "gio-2.0.0", "gmodule-2.0.0",
-    "spice-client-glib-2.0.8",
-    "gstreamer-1.0.0", "gstbase-1.0.0", "gstapp-1.0.0", "gstaudio-1.0.0", "gstvideo-1.0.0",
-    "gstpbutils-1.0.0",
-    "usb-1.0.0",
-    "jpeg.62",
-    "intl.8",
+// The native SPICE stack is linked as @rpath dylibs from ./Sysroot/lib, built from
+// pinned sources by scripts/build-deps.sh (install names already @rpath) and
+// embedded in Contents/Frameworks by build-app.sh. Transitive deps (pixman, openssl,
+// opus, json-glib, usbredir, …) load at runtime via @rpath, so only the libraries
+// the app and CocoaSpice reference directly are listed here.
+let spiceLibraries = [
+    "glib-2.0", "gobject-2.0", "gio-2.0", "gmodule-2.0",
+    "spice-client-glib-2.0",
+    "gstreamer-1.0", "gstbase-1.0", "gstapp-1.0", "gstaudio-1.0", "gstvideo-1.0",
+    "gstpbutils-1.0", "gsttag-1.0",
+    "usb-1.0",
+    "jpeg",
 ]
 // CocoaSpice's gst_ios_init.m statically registers these GStreamer plugins, so
-// their static archives (staged into Frameworks/gstreamer-1.0/) must be linked.
+// their static archives (in Sysroot/lib/gstreamer-1.0/) must be linked.
 let gstPlugins = [
     "adder", "app", "audioconvert", "audiorate", "audioresample", "audiotestsrc",
     "autodetect", "coreelements", "gio", "jpeg", "osxaudio", "playback",
-    "typefindfunctions", "videoconvert", "videofilter", "videorate", "videoscale",
+    "typefindfunctions", "videoconvertscale", "videofilter", "videorate",
     "videotestsrc", "volume",
 ]
 // macOS system frameworks the plugins/codecs need (osxaudio → CoreAudio/AudioToolbox/…).
@@ -44,10 +40,10 @@ let systemFrameworks = ["CoreAudio", "AudioToolbox", "AudioUnit", "CoreMedia", "
 
 // Build the linker flags imperatively — a single large `+`/flatMap expression
 // makes the manifest type-checker time out.
-var spiceLinkFlags: [String] = ["-F", "Frameworks"]
-for framework in spiceFrameworks { spiceLinkFlags += ["-framework", framework] }
+var spiceLinkFlags: [String] = ["-L", "Sysroot/lib"]
+for library in spiceLibraries { spiceLinkFlags += ["-l\(library)"] }
 for framework in systemFrameworks { spiceLinkFlags += ["-framework", framework] }
-for plugin in gstPlugins { spiceLinkFlags += ["-Xlinker", "Frameworks/gstreamer-1.0/libgst\(plugin).a"] }
+for plugin in gstPlugins { spiceLinkFlags += ["-Xlinker", "Sysroot/lib/gstreamer-1.0/libgst\(plugin).a"] }
 spiceLinkFlags += ["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]
 spiceLinkFlags += ["-Xlinker", "-rpath", "-Xlinker", "@loader_path/../Frameworks"]
 

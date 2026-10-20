@@ -77,6 +77,17 @@ on a rebase:
   accumulate. (Pairs with the bridge change in
   `Packages/SpiceController/Sources/SpiceController/SpicePasteboardBridge.swift`.)
 
+## Build integration (spice-mac additions)
+
+- **`Package.swift`** — compiles against the headers `scripts/build-deps.sh` installs
+  into `<spice-mac>/Sysroot` (the same build the app links) instead of the vendored
+  `Sources/CocoaSpice/ExternalHeaders/`, which no longer matches the libraries
+  (spice-gtk 0.43, glib 2.88, GStreamer 1.28) and is unused.
+- **`Sources/CocoaSpice/gst_ios_init.m`** — GStreamer 1.22 merged the `videoconvert`
+  and `videoscale` plugins into `videoconvertscale`; declare/register that instead.
+- CocoaSpice relies on `spice_util_set_main_context()` from UTM's spice-gtk patches;
+  their port to 0.43 lives in `deps/patches/spice-gtk/`.
+
 ## Updating upstream
 
 To re-base onto a newer CocoaSpice: replace this directory with the new upstream

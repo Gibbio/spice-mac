@@ -1,5 +1,6 @@
 // swift-tools-version:5.5
 
+import Foundation
 import PackageDescription
 
 // spice-mac fork addition: suppress upstream CocoaSpice's benign ObjC warnings so
@@ -10,6 +11,18 @@ let quietWarnings = [
     "-Wno-incomplete-implementation",
     "-Wno-return-type",
 ]
+
+// spice-mac fork addition: compile against the headers of the native stack that
+// scripts/build-deps.sh installs into <spice-mac>/Sysroot — the same build the app
+// links — rather than a vendored copy that can drift from it.
+let sysroot = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .appendingPathComponent("../../Sysroot")
+    .standardizedFileURL.path
+let sysrootHeaders = [
+    "include", "include/glib-2.0", "lib/glib-2.0/include", "include/gstreamer-1.0",
+    "include/libusb-1.0", "include/pixman-1", "include/spice-1", "include/spice-client-glib-2.0",
+].flatMap { ["-I", "\(sysroot)/\($0)"] }
 
 let package = Package(
     name: "CocoaSpice",
@@ -44,13 +57,7 @@ let package = Package(
             exclude: ["ExternalHeaders"],
             cSettings: [
                 .define("WITH_USB_SUPPORT"),
-                .unsafeFlags(quietWarnings),
-                .headerSearchPath("ExternalHeaders"),
-                .headerSearchPath("ExternalHeaders/glib-2.0"),
-                .headerSearchPath("ExternalHeaders/gstreamer-1.0"),
-                .headerSearchPath("ExternalHeaders/libusb-1.0"),
-                .headerSearchPath("ExternalHeaders/spice-1"),
-                .headerSearchPath("ExternalHeaders/spice-client-glib-2.0")]),
+                .unsafeFlags(quietWarnings + sysrootHeaders)]),
         .target(
             name: "CocoaSpiceNoUsb",
             dependencies: ["CocoaSpiceRenderer"],
@@ -59,11 +66,7 @@ let package = Package(
                 "CSUSBDevice.m",
                 "CSUSBManager.m"],
             cSettings: [
-                .headerSearchPath("ExternalHeaders"),
-                .headerSearchPath("ExternalHeaders/glib-2.0"),
-                .headerSearchPath("ExternalHeaders/gstreamer-1.0"),
-                .headerSearchPath("ExternalHeaders/spice-1"),
-                .headerSearchPath("ExternalHeaders/spice-client-glib-2.0")]),
+                .unsafeFlags(sysrootHeaders)]),
         .testTarget(
             name: "CocoaSpiceTests",
             dependencies: ["CocoaSpice"],

@@ -1,0 +1,707 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: spice-mac <spice-mac@localhost>
+Date: Tue, 20 Oct 2026 07:52:47 +0200
+Subject: [PATCH 6/9] display: add a VideoToolbox decoder for H.264 streams on
+ macOS
+
+Decode H.264 video streams with VideoToolbox (hardware, no GStreamer needed):
+frames are decoded synchronously as they arrive and the BGRA pictures wait for
+their multimedia time, like the builtin MJPEG decoder. Late pictures are only
+dropped at display time, since later frames reference them. H.265 is wired up
+but opt-in (SPICE_VIDEOTOOLBOX_HEVC=1) until exercised against a server.
+
+Advertise the codecs VideoToolbox decodes, and log the codec and size of each
+new stream. SPICE_PREFERRED_VIDEO_CODECS (e.g. "h264,mjpeg") asks the server to
+prefer them; it is opt-in because spice-server 0.15.2 can crash when a
+GStreamer-encoded stream is torn down.
+---
+ meson.build                |  13 +
+ src/channel-display-priv.h |   4 +
+ src/channel-display-vt.c   | 528 +++++++++++++++++++++++++++++++++++++
+ src/channel-display.c      |  55 ++++
+ src/meson.build            |   4 +
+ 5 files changed, 604 insertions(+)
+ create mode 100644 src/channel-display-vt.c
+
+diff --git a/meson.build b/meson.build
+index 559ff33..1567d39 100644
+--- a/meson.build
++++ b/meson.build
+@@ -225,6 +225,19 @@ if get_option('builtin-mjpeg')
+ endif
+ summary_info += {'builtin-mjpeg': get_option('builtin-mjpeg')}
+ 
++# VideoToolbox (macOS): hardware H.264/H.265 stream decoding without GStreamer
++spice_gtk_has_videotoolbox = false
++if host_machine.system() == 'darwin'
++  d = dependency('appleframeworks', modules : ['VideoToolbox', 'CoreMedia', 'CoreVideo', 'CoreFoundation'],
++                 required : false)
++  if d.found()
++    spice_glib_deps += d
++    spice_gtk_config_data.set('HAVE_VIDEOTOOLBOX', '1')
++    spice_gtk_has_videotoolbox = true
++  endif
++endif
++summary_info += {'videotoolbox': spice_gtk_has_videotoolbox}
++
+ # usbredir
+ spice_gtk_has_usbredir = false
+ usbredir_version = '0.7.1'
+diff --git a/src/channel-display-priv.h b/src/channel-display-priv.h
+index f043352..0bb35a0 100644
+--- a/src/channel-display-priv.h
++++ b/src/channel-display-priv.h
+@@ -87,6 +87,10 @@ VideoDecoder* create_mjpeg_decoder(int codec_type, display_stream *stream);
+ #endif
+ VideoDecoder* create_gstreamer_decoder(int codec_type, display_stream *stream);
+ gboolean gstvideo_has_codec(int codec_type);
++#ifdef HAVE_VIDEOTOOLBOX
++VideoDecoder* create_vt_decoder(int codec_type, display_stream *stream);
++gboolean vtvideo_has_codec(int codec_type);
++#endif
+ 
+ 
+ typedef struct display_surface {
+diff --git a/src/channel-display-vt.c b/src/channel-display-vt.c
+new file mode 100644
+index 0000000..44d75f9
+--- /dev/null
++++ b/src/channel-display-vt.c
+@@ -0,0 +1,528 @@
++/* -*- Mode: C; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++/*
++   Copyright (C) 2026 spice-mac contributors
++
++   This library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   This library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with this library; if not, see <http://www.gnu.org/licenses/>.
++*/
++
++/* VideoToolbox video decoder (macOS): hardware H.264 (and, opt-in, H.265) decoding
++ * for SPICE video streams, without GStreamer.
++ *
++ * Frames are decoded synchronously on the main context as they arrive — a
++ * hardware decode takes a few milliseconds, the builtin MJPEG decoder decodes
++ * inline the same way — and every frame is decoded, since later frames reference
++ * earlier ones. Pictures come out as BGRA (converted by VideoToolbox) and wait in a
++ * queue for their multimedia time; late ones are dropped at display time only.
++ */
++#include "config.h"
++
++#include <VideoToolbox/VideoToolbox.h>
++
++#include "spice-client.h"
++#include "spice-common.h"
++#include "spice-channel-priv.h"
++#include "channel-display-priv.h"
++
++typedef struct VTPicture {
++    SpiceFrame *frame;          /* mm_time and destination of the picture */
++    CVPixelBufferRef image;     /* decoded BGRA picture */
++} VTPicture;
++
++typedef struct VTDecoder {
++    VideoDecoder base;
++
++    gboolean hevc;
++    VTDecompressionSessionRef session;
++    CMVideoFormatDescriptionRef format;
++
++    /* Latest parameter sets, NAL payloads without start codes. The server sends
++     * them with the first frame of a stream; they are cached so a session lost
++     * to e.g. sleep can be rebuilt without waiting for the next keyframe. */
++    GBytes *vps, *sps, *pps;
++    gboolean params_changed;
++
++    /* Scratch buffer for the length-prefixed (AVCC/HVCC) sample. */
++    GByteArray *sample;
++
++    /* Output of the synchronous decode, set by the output callback. */
++    CVPixelBufferRef decoded;
++    OSStatus decode_status;
++
++    /* Decoded pictures waiting for their multimedia time. */
++    GQueue *pictures;
++    VTPicture *cur;
++    guint timer_id;
++    guint32 last_mm_time;
++} VTDecoder;
++
++/* ---------- Annex B parsing ---------- */
++
++enum {
++    H264_NAL_SEI = 6, H264_NAL_SPS = 7, H264_NAL_PPS = 8, H264_NAL_AUD = 9,
++    H264_NAL_FILLER = 12,
++    HEVC_NAL_VPS = 32, HEVC_NAL_SPS = 33, HEVC_NAL_PPS = 34, HEVC_NAL_AUD = 35,
++    HEVC_NAL_FD = 38,
++};
++
++/* Returns the start of the next 00 00 01 / 00 00 00 01 start code, or end. */
++static const uint8_t *find_start_code(const uint8_t *p, const uint8_t *end, int *code_len)
++{
++    for (; p + 3 <= end; p++) {
++        if (p[0] == 0 && p[1] == 0) {
++            if (p[2] == 1) {
++                *code_len = 3;
++                return p;
++            }
++            if (p + 4 <= end && p[2] == 0 && p[3] == 1) {
++                *code_len = 4;
++                return p;
++            }
++        }
++    }
++    *code_len = 0;
++    return end;
++}
++
++static gboolean update_param(GBytes **slot, const uint8_t *nal, gsize len)
++{
++    if (*slot != NULL) {
++        gsize old_len;
++        const void *old = g_bytes_get_data(*slot, &old_len);
++        if (old_len == len && memcmp(old, nal, len) == 0) {
++            return FALSE;
++        }
++        g_bytes_unref(*slot);
++    }
++    *slot = g_bytes_new(nal, len);
++    return TRUE;
++}
++
++/* Splits an Annex B access unit: parameter sets go to the cache, slices (and SEI)
++ * are appended to decoder->sample as 4-byte big-endian length-prefixed NALs. */
++static void vt_parse_access_unit(VTDecoder *decoder, const uint8_t *data, gsize size)
++{
++    const uint8_t *end = data + size;
++    int code_len;
++    const uint8_t *p = find_start_code(data, end, &code_len);
++
++    g_byte_array_set_size(decoder->sample, 0);
++    while (p < end) {
++        const uint8_t *nal = p + code_len;
++        const uint8_t *next = find_start_code(nal, end, &code_len);
++        const uint8_t *nal_end = next;
++
++        /* trailing_zero_8bits belong to no NAL */
++        while (nal_end > nal && nal_end[-1] == 0) {
++            nal_end--;
++        }
++        p = next;
++        if (nal_end <= nal) {
++            continue;
++        }
++
++        gsize len = nal_end - nal;
++        if (decoder->hevc) {
++            switch ((nal[0] >> 1) & 0x3f) {
++            case HEVC_NAL_VPS:
++                decoder->params_changed |= update_param(&decoder->vps, nal, len);
++                continue;
++            case HEVC_NAL_SPS:
++                decoder->params_changed |= update_param(&decoder->sps, nal, len);
++                continue;
++            case HEVC_NAL_PPS:
++                decoder->params_changed |= update_param(&decoder->pps, nal, len);
++                continue;
++            case HEVC_NAL_AUD:
++            case HEVC_NAL_FD:
++                continue;
++            }
++        } else {
++            switch (nal[0] & 0x1f) {
++            case H264_NAL_SPS:
++                decoder->params_changed |= update_param(&decoder->sps, nal, len);
++                continue;
++            case H264_NAL_PPS:
++                decoder->params_changed |= update_param(&decoder->pps, nal, len);
++                continue;
++            case H264_NAL_AUD:
++            case H264_NAL_FILLER:
++                continue;
++            }
++        }
++
++        guint8 prefix[4] = { len >> 24, len >> 16, len >> 8, len };
++        g_byte_array_append(decoder->sample, prefix, sizeof(prefix));
++        g_byte_array_append(decoder->sample, nal, len);
++    }
++}
++
++/* ---------- VideoToolbox session ---------- */
++
++static void vt_output_callback(void *decompression_refcon, void *frame_refcon,
++                               OSStatus status, VTDecodeInfoFlags flags,
++                               CVImageBufferRef image, CMTime pts, CMTime duration)
++{
++    VTDecoder *decoder = decompression_refcon;
++
++    decoder->decode_status = status;
++    if (status == noErr && image != NULL && !(flags & kVTDecodeInfo_FrameDropped)) {
++        decoder->decoded = CVPixelBufferRetain(image);
++    }
++}
++
++static void vt_destroy_session(VTDecoder *decoder)
++{
++    if (decoder->session != NULL) {
++        VTDecompressionSessionInvalidate(decoder->session);
++        CFRelease(decoder->session);
++        decoder->session = NULL;
++    }
++}
++
++static CFDictionaryRef vt_output_attributes(void)
++{
++    /* BGRA matches what the canvas takes (the MJPEG decoder's JCS_EXT_BGRX);
++     * VideoToolbox does the YUV→BGRA conversion on the GPU. IOSurface backing
++     * keeps that conversion zero-copy and lets a renderer use it directly. */
++    int32_t bgra = kCVPixelFormatType_32BGRA;
++    CFNumberRef format = CFNumberCreate(NULL, kCFNumberSInt32Type, &bgra);
++    CFDictionaryRef iosurface = CFDictionaryCreate(NULL, NULL, NULL, 0,
++                                                   &kCFTypeDictionaryKeyCallBacks,
++                                                   &kCFTypeDictionaryValueCallBacks);
++    const void *keys[] = { kCVPixelBufferPixelFormatTypeKey,
++                           kCVPixelBufferIOSurfacePropertiesKey,
++                           kCVPixelBufferMetalCompatibilityKey };
++    const void *values[] = { format, iosurface, kCFBooleanTrue };
++    CFDictionaryRef attrs = CFDictionaryCreate(NULL, keys, values, G_N_ELEMENTS(keys),
++                                               &kCFTypeDictionaryKeyCallBacks,
++                                               &kCFTypeDictionaryValueCallBacks);
++    CFRelease(format);
++    CFRelease(iosurface);
++    return attrs;
++}
++
++/* (Re)builds the format description from the cached parameter sets and makes sure
++ * a session that accepts it exists. */
++static gboolean vt_ensure_session(VTDecoder *decoder)
++{
++    if (decoder->session != NULL && !decoder->params_changed) {
++        return TRUE;
++    }
++    if (decoder->sps == NULL || decoder->pps == NULL || (decoder->hevc && decoder->vps == NULL)) {
++        return FALSE;   /* nothing decodable before the first parameter sets */
++    }
++
++    const uint8_t *sets[3];
++    size_t sizes[3];
++    size_t n = 0;
++    GBytes *params[3] = { decoder->hevc ? decoder->vps : NULL, decoder->sps, decoder->pps };
++    for (int i = 0; i < 3; i++) {
++        if (params[i] != NULL) {
++            sets[n] = g_bytes_get_data(params[i], &sizes[n]);
++            n++;
++        }
++    }
++
++    CMVideoFormatDescriptionRef format = NULL;
++    OSStatus status;
++    if (decoder->hevc) {
++        status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(NULL, n, sets, sizes, 4,
++                                                                     NULL, &format);
++    } else {
++        status = CMVideoFormatDescriptionCreateFromH264ParameterSets(NULL, n, sets, sizes, 4,
++                                                                     &format);
++    }
++    if (status != noErr) {
++        g_warning("VideoToolbox: invalid %s parameter sets (%d)",
++                  decoder->hevc ? "H.265" : "H.264", (int)status);
++        return FALSE;
++    }
++    decoder->params_changed = FALSE;
++
++    if (decoder->session != NULL &&
++        VTDecompressionSessionCanAcceptFormatDescription(decoder->session, format)) {
++        CFRelease(decoder->format);
++        decoder->format = format;
++        return TRUE;
++    }
++
++    vt_destroy_session(decoder);
++    if (decoder->format != NULL) {
++        CFRelease(decoder->format);
++    }
++    decoder->format = format;
++
++    const void *spec_keys[] = { kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder };
++    const void *spec_values[] = { kCFBooleanTrue };
++    CFDictionaryRef spec = CFDictionaryCreate(NULL, spec_keys, spec_values, 1,
++                                              &kCFTypeDictionaryKeyCallBacks,
++                                              &kCFTypeDictionaryValueCallBacks);
++    CFDictionaryRef attrs = vt_output_attributes();
++    VTDecompressionOutputCallbackRecord callback = { vt_output_callback, decoder };
++
++    status = VTDecompressionSessionCreate(NULL, format, spec, attrs, &callback, &decoder->session);
++    CFRelease(spec);
++    CFRelease(attrs);
++    if (status != noErr) {
++        g_warning("VideoToolbox: cannot create a %s decoder session (%d)",
++                  decoder->hevc ? "H.265" : "H.264", (int)status);
++        decoder->session = NULL;
++        return FALSE;
++    }
++
++    CMVideoDimensions dim = CMVideoFormatDescriptionGetDimensions(format);
++    SPICE_DEBUG("VideoToolbox: %s session %dx%d", decoder->hevc ? "H.265" : "H.264",
++                dim.width, dim.height);
++    return TRUE;
++}
++
++/* Decodes decoder->sample; returns the picture (retained) or NULL. */
++static CVPixelBufferRef vt_decode_sample(VTDecoder *decoder, guint32 mm_time)
++{
++    CMBlockBufferRef block = NULL;
++    CMSampleBufferRef sample = NULL;
++    gsize len = decoder->sample->len;
++
++    /* The block buffer owns a copy: VideoToolbox may hold on to the sample. */
++    if (CMBlockBufferCreateWithMemoryBlock(NULL, NULL, len, NULL, NULL, 0, len,
++                                           kCMBlockBufferAssureMemoryNowFlag,
++                                           &block) != noErr ||
++        CMBlockBufferReplaceDataBytes(decoder->sample->data, block, 0, len) != noErr) {
++        g_clear_pointer(&block, CFRelease);
++        return NULL;
++    }
++
++    CMSampleTimingInfo timing = {
++        .duration = kCMTimeInvalid,
++        .presentationTimeStamp = CMTimeMake(mm_time, 1000),
++        .decodeTimeStamp = kCMTimeInvalid,
++    };
++    if (CMSampleBufferCreateReady(NULL, block, decoder->format, 1, 1, &timing, 1, &len,
++                                  &sample) != noErr) {
++        CFRelease(block);
++        return NULL;
++    }
++    CFRelease(block);
++
++    decoder->decoded = NULL;
++    decoder->decode_status = noErr;
++    /* No kVTDecodeFrame_EnableAsynchronousDecompression: the output callback has
++     * run by the time this returns. */
++    VTDecodeInfoFlags info = 0;
++    OSStatus status = VTDecompressionSessionDecodeFrame(decoder->session, sample,
++                                                        kVTDecodeFrame_1xRealTimePlayback,
++                                                        NULL, &info);
++    CFRelease(sample);
++    if (status == noErr) {
++        status = decoder->decode_status;
++    }
++    if (status == kVTInvalidSessionErr) {
++        /* e.g. after sleep or a GPU switch: rebuild from the cached parameter
++         * sets on the next frame. */
++        SPICE_DEBUG("VideoToolbox: session invalidated, recreating");
++        vt_destroy_session(decoder);
++        decoder->params_changed = TRUE;
++    } else if (status != noErr) {
++        SPICE_DEBUG("VideoToolbox: decode error %d", (int)status);
++    }
++
++    CVPixelBufferRef image = decoder->decoded;
++    decoder->decoded = NULL;
++    if (status != noErr && image != NULL) {
++        CVPixelBufferRelease(image);
++        image = NULL;
++    }
++    return image;
++}
++
++/* ---------- Display queue ---------- */
++
++static void vt_picture_free(VTPicture *picture)
++{
++    if (picture->image != NULL) {
++        CVPixelBufferRelease(picture->image);
++    }
++    spice_frame_free(picture->frame);
++    g_free(picture);
++}
++
++static void vt_decoder_schedule(VTDecoder *decoder);
++
++/* main context */
++static gboolean vt_decoder_display_picture(gpointer video_decoder)
++{
++    VTDecoder *decoder = video_decoder;
++    VTPicture *picture = decoder->cur;
++    CVPixelBufferRef image = picture->image;
++
++    decoder->cur = NULL;
++    decoder->timer_id = 0;
++
++    if (CVPixelBufferLockBaseAddress(image, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess) {
++        stream_display_frame(decoder->base.stream, picture->frame,
++                             CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image),
++                             CVPixelBufferGetBytesPerRow(image),
++                             CVPixelBufferGetBaseAddress(image));
++        CVPixelBufferUnlockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
++    }
++    vt_picture_free(picture);
++
++    vt_decoder_schedule(decoder);
++    return G_SOURCE_REMOVE;
++}
++
++static void vt_decoder_schedule(VTDecoder *decoder)
++{
++    if (decoder->timer_id != 0) {
++        return;
++    }
++
++    guint32 time = stream_get_time(decoder->base.stream);
++    VTPicture *picture = decoder->cur;
++    decoder->cur = NULL;
++    do {
++        if (picture != NULL) {
++            if (spice_mmtime_diff(time, picture->frame->mm_time) <= 0) {
++                decoder->cur = picture;
++                decoder->timer_id = g_spice_timeout_add(picture->frame->mm_time - time,
++                                                        vt_decoder_display_picture, decoder);
++                break;
++            }
++            SPICE_DEBUG("%s: rendering too late by %u ms (ts: %u, mmtime: %u), dropping",
++                        __FUNCTION__, time - picture->frame->mm_time,
++                        picture->frame->mm_time, time);
++            stream_dropped_frame_on_playback(decoder->base.stream);
++            vt_picture_free(picture);
++        }
++        picture = g_queue_pop_head(decoder->pictures);
++    } while (picture != NULL);
++}
++
++static void vt_decoder_drop_queue(VTDecoder *decoder)
++{
++    if (decoder->timer_id != 0) {
++        g_spice_source_remove(decoder->timer_id);
++        decoder->timer_id = 0;
++    }
++    g_clear_pointer(&decoder->cur, vt_picture_free);
++    g_queue_free_full(decoder->pictures, (GDestroyNotify)vt_picture_free);
++    decoder->pictures = g_queue_new();
++}
++
++/* ---------- VideoDecoder's public API ---------- */
++
++static gboolean vt_decoder_queue_frame(VideoDecoder *video_decoder,
++                                       SpiceFrame *frame, int margin)
++{
++    VTDecoder *decoder = (VTDecoder *)video_decoder;
++
++    if (!g_queue_is_empty(decoder->pictures) &&
++        spice_mmtime_diff(frame->mm_time, decoder->last_mm_time) < 0) {
++        /* This should really not happen */
++        SPICE_DEBUG("new-frame-time < last-frame-time (%u < %u): resetting stream",
++                    frame->mm_time, decoder->last_mm_time);
++        vt_decoder_drop_queue(decoder);
++    }
++    decoder->last_mm_time = frame->mm_time;
++
++    /* Late frames are still decoded (later frames reference them) and only
++     * dropped at display time, by vt_decoder_schedule(). */
++    vt_parse_access_unit(decoder, frame->data, frame->size);
++    if (decoder->sample->len == 0 || !vt_ensure_session(decoder)) {
++        stream_dropped_frame_on_playback(decoder->base.stream);
++        spice_frame_free(frame);
++        return TRUE;
++    }
++
++    CVPixelBufferRef image = vt_decode_sample(decoder, frame->mm_time);
++    if (image == NULL) {
++        stream_dropped_frame_on_playback(decoder->base.stream);
++        spice_frame_free(frame);
++        return TRUE;
++    }
++
++    VTPicture *picture = g_new0(VTPicture, 1);
++    picture->frame = frame;
++    picture->image = image;
++    g_queue_push_tail(decoder->pictures, picture);
++    vt_decoder_schedule(decoder);
++    return TRUE;
++}
++
++static void vt_decoder_reschedule(VideoDecoder *video_decoder)
++{
++    VTDecoder *decoder = (VTDecoder *)video_decoder;
++
++    SPICE_DEBUG("%s", __FUNCTION__);
++    if (decoder->timer_id != 0) {
++        g_spice_source_remove(decoder->timer_id);
++        decoder->timer_id = 0;
++    }
++    vt_decoder_schedule(decoder);
++}
++
++static void vt_decoder_destroy(VideoDecoder *video_decoder)
++{
++    VTDecoder *decoder = (VTDecoder *)video_decoder;
++
++    vt_decoder_drop_queue(decoder);
++    g_queue_free(decoder->pictures);
++    vt_destroy_session(decoder);
++    if (decoder->format != NULL) {
++        CFRelease(decoder->format);
++    }
++    g_clear_pointer(&decoder->vps, g_bytes_unref);
++    g_clear_pointer(&decoder->sps, g_bytes_unref);
++    g_clear_pointer(&decoder->pps, g_bytes_unref);
++    g_byte_array_unref(decoder->sample);
++    g_free(decoder);
++}
++
++G_GNUC_INTERNAL
++gboolean vtvideo_has_codec(int codec_type)
++{
++    if (g_getenv("SPICE_VIDEOTOOLBOX_DISABLE") != NULL) {
++        return FALSE;
++    }
++    switch (codec_type) {
++    case SPICE_VIDEO_CODEC_TYPE_H264:
++        return TRUE;
++    case SPICE_VIDEO_CODEC_TYPE_H265:
++        /* Opt-in until it has been exercised against a server that sends it. */
++        return g_getenv("SPICE_VIDEOTOOLBOX_HEVC") != NULL &&
++               VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC);
++    default:
++        return FALSE;
++    }
++}
++
++G_GNUC_INTERNAL
++VideoDecoder *create_vt_decoder(int codec_type, display_stream *stream)
++{
++    g_return_val_if_fail(vtvideo_has_codec(codec_type), NULL);
++
++    VTDecoder *decoder = g_new0(VTDecoder, 1);
++    decoder->base.destroy = vt_decoder_destroy;
++    decoder->base.reschedule = vt_decoder_reschedule;
++    decoder->base.queue_frame = vt_decoder_queue_frame;
++    decoder->base.codec_type = codec_type;
++    decoder->base.stream = stream;
++    decoder->hevc = codec_type == SPICE_VIDEO_CODEC_TYPE_H265;
++    decoder->sample = g_byte_array_new();
++    decoder->pictures = g_queue_new();
++
++    /* makes the draw-area visible */
++    hand_pipeline_to_widget(stream, NULL);
++    return (VideoDecoder *)decoder;
++}
+diff --git a/src/channel-display.c b/src/channel-display.c
+index db4f6ad..bbc170d 100644
+--- a/src/channel-display.c
++++ b/src/channel-display.c
+@@ -991,6 +991,13 @@ static void spice_display_channel_set_capabilities(SpiceChannel *channel)
+     spice_channel_set_capability(channel, SPICE_DISPLAY_CAP_CODEC_MJPEG);
+ #endif
+     for (i = 1; i < G_N_ELEMENTS(gst_opts); i++) {
++#ifdef HAVE_VIDEOTOOLBOX
++        if (vtvideo_has_codec(i)) {
++            SPICE_DEBUG("VideoToolbox supports the %s codec", gst_opts[i].name);
++            (spice_channel_set_capability)(channel, gst_opts[i].cap);
++            continue;
++        }
++#endif
+         if (gstvideo_has_codec(i)) {
+             /* use extra parenthesis to avoid an unwanted macro expansion */
+             (spice_channel_set_capability)(channel, gst_opts[i].cap);
+@@ -1000,6 +1007,39 @@ static void spice_display_channel_set_capabilities(SpiceChannel *channel)
+     }
+ }
+ 
++#ifdef HAVE_VIDEOTOOLBOX
++/* SPICE_PREFERRED_VIDEO_CODECS="h264,mjpeg" asks the server to prefer these codecs.
++ * Servers pick from their own list in order (spice:mjpeg first by default), so
++ * without it they keep sending MJPEG even to a client that decodes H.264. It is
++ * opt-in rather than automatic: spice-server 0.15.2 can crash (taking QEMU down)
++ * when a GStreamer-encoded stream is torn down. */
++static void display_send_preferred_codecs_from_env(SpiceChannel *channel)
++{
++    gint codecs[SPICE_VIDEO_CODEC_TYPE_ENUM_END];
++    gsize n = 0;
++    const gchar *env = g_getenv("SPICE_PREFERRED_VIDEO_CODECS");
++    GError *err = NULL;
++
++    if (env == NULL ||
++        !spice_channel_test_capability(channel, SPICE_DISPLAY_CAP_PREF_VIDEO_CODEC_TYPE)) {
++        return;
++    }
++    gchar **names = g_strsplit(env, ",", -1);
++    for (gchar **name = names; *name != NULL && n < G_N_ELEMENTS(codecs); name++) {
++        for (gint i = 1; i < (gint)G_N_ELEMENTS(gst_opts); i++) {
++            if (g_ascii_strcasecmp(g_strstrip(*name), gst_opts[i].name) == 0) {
++                codecs[n++] = i;
++            }
++        }
++    }
++    g_strfreev(names);
++    if (n > 0 && !spice_display_channel_change_preferred_video_codec_types(channel, codecs, n, &err)) {
++        CHANNEL_DEBUG(channel, "could not set the preferred video codecs: %s", err->message);
++        g_clear_error(&err);
++    }
++}
++#endif
++
+ static void destroy_surface(gpointer data)
+ {
+     display_surface *surface = data;
+@@ -1191,6 +1231,9 @@ static void spice_display_channel_up(SpiceChannel *channel)
+     if (preferred_compression != SPICE_IMAGE_COMPRESSION_INVALID) {
+         spice_display_channel_change_preferred_compression(channel, preferred_compression);
+     }
++#ifdef HAVE_VIDEOTOOLBOX
++    display_send_preferred_codecs_from_env(channel);
++#endif
+ }
+ 
+ #define DRAW(type) {                                                    \
+@@ -1395,6 +1438,12 @@ static display_stream *display_stream_create(SpiceChannel *channel,
+     region_init(&st->region);
+     display_update_stream_region(st);
+ 
++    CHANNEL_DEBUG(channel, "stream %u: codec %s, %dx%d at %d,%d, flags 0x%x", id,
++                  codec_type > 0 && codec_type < G_N_ELEMENTS(gst_opts) ?
++                      gst_opts[codec_type].name : "?",
++                  dest->right - dest->left, dest->bottom - dest->top,
++                  dest->left, dest->top, flags);
++
+     switch (codec_type) {
+ #ifdef HAVE_BUILTIN_MJPEG
+     case SPICE_VIDEO_CODEC_TYPE_MJPEG:
+@@ -1402,6 +1451,12 @@ static display_stream *display_stream_create(SpiceChannel *channel,
+         break;
+ #endif
+     default:
++#ifdef HAVE_VIDEOTOOLBOX
++        if (vtvideo_has_codec(codec_type)) {
++            st->video_decoder = create_vt_decoder(codec_type, st);
++            break;
++        }
++#endif
+         st->video_decoder = create_gstreamer_decoder(codec_type, st);
+         break;
+     }
+diff --git a/src/meson.build b/src/meson.build
+index 7289f8d..908e3c9 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -181,6 +181,10 @@ if spice_gtk_has_builtin_mjpeg
+   spice_client_glib_sources += 'channel-display-mjpeg.c'
+ endif
+ 
++if spice_gtk_has_videotoolbox
++  spice_client_glib_sources += 'channel-display-vt.c'
++endif
++
+ if spice_gtk_has_polkit
+   spice_client_glib_sources += ['usb-acl-helper.c',
+                                 'usb-acl-helper.h']

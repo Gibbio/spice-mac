@@ -22,10 +22,10 @@ change.
  1 file changed, 10 insertions(+), 1 deletion(-)
 
 diff --git a/src/channel-display.c b/src/channel-display.c
-index 7d677d6..01ad4ae 100644
+index 13deae1..7169484 100644
 --- a/src/channel-display.c
 +++ b/src/channel-display.c
-@@ -2060,6 +2060,15 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+@@ -2088,6 +2088,15 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
      shift = display_playout_shift(channel, margin);
      margin -= shift;
      st->shown_margin = margin;
@@ -41,7 +41,7 @@ index 7d677d6..01ad4ae 100644
      if (margin > 0) {
          SpiceSession *s = spice_channel_get_session(channel);
  
-@@ -2068,7 +2077,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+@@ -2096,7 +2105,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
              margin = 0;
          }
      }

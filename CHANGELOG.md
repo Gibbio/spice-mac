@@ -19,7 +19,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spice-gtk 0.42.
 - **Hardware H.264 decoding (VideoToolbox)** for SPICE video streams (in our 720p30
   test, debug logging on: ~11% of a core against ~26% for MJPEG). Opt-in
-  (`SPICE_PREFERRED_VIDEO_CODECS=h264,mjpeg`): Proxmox's spice-server encodes
+  (Connection ▸ Prefer H.264 Video, below): Proxmox's spice-server encodes
   H.264 in software, about a third of a node core per stream, and only with
   `gstreamer1.0-plugins-ugly` installed. The preference is sent once the server
   has set the display channel up: sent earlier, while a video was playing, it
@@ -29,12 +29,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`qxl` display, `videostreaming` on), and
   [docs/server-side-video.md](docs/server-side-video.md) what the node needs for
   better video, up to H.264 on Intel Quick Sync with spice-server 0.16.
+- **Connection ▸ Prefer H.264 Video** (off by default) and **Connection ▸ Video
+  Delay** (30, 50 or 80 ms after arrival), both applied to open connections at
+  once: the server restarts its streams with the new codec, and the next frame
+  takes the new delay. `SPICE_PREFERRED_VIDEO_CODECS` and
+  `SPICE_STREAM_PLAYOUT_MS` at launch override them.
+- **View ▸ Show Statistics** (⌃⌘I): a panel over the display with bandwidth by
+  channel, TCP round trip, TLS, the Mac's frame rate and upload-to-screen time,
+  each video stream's codec, decoder, frame rates, late and dropped frames and
+  playout delay, and the audio codec and delay.
 
 ### Changed
 
 - **Video no longer lags 400 ms behind the guest** unless it is playing sound:
-  streamed frames are shown ~50 ms after they arrive (`SPICE_STREAM_PLAYOUT_MS`;
-  `0` restores the stock behaviour). Click to the client's framebuffer in our LAN
+  streamed frames are shown ~50 ms after they arrive (Connection ▸ Video Delay,
+  or `SPICE_STREAM_PLAYOUT_MS`, where `0` restores the stock behaviour). Click to the client's framebuffer in our LAN
   test: a median 154 ms instead of ~500 ms, with the same smoothness. Sounds
   shorter than a few seconds (notifications) leave its timing alone; longer ones
   hand it back to the server's timing, lined up with the audio, 3–4 s in. With

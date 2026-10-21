@@ -94,6 +94,25 @@ logged once a second, in two parts:
 - **`Sources/CocoaSpiceRenderer/CSMetalRenderer.m`** (`_recordPresentLatency:`) —
   `present`: from the upload to the drawable's `presentedTime`.
 
+## Video settings and statistics (spice-mac additions)
+
+For SpiceMac's Connection ▸ Prefer H.264 Video / Video Delay and View ▸ Show
+Statistics, on top of spice-gtk patches 0010 (the codec preference is held until
+the server's first MARK) and 0012 (the playout setter and the statistics getters):
+
+- **`Sources/CocoaSpice/include/CSConnection+Streaming.h`** (in the umbrella
+  header), implemented in **`CSConnection.m`** — `preferredVideoCodecs` and
+  `streamPlayoutDelay`, applied to each display channel when it opens
+  (`cs_display_channel_event`) and at once to the open ones;
+  `-readStatisticsWithCompletion:` collects on the SPICE thread the bytes received
+  per channel type, the main channel's TCP round trip (`TCP_CONNECTION_INFO`), TLS
+  version and cipher and mouse mode, the playback channel's codec and delay, and
+  every display's stream statistics.
+- **`Sources/CocoaSpiceRenderer/CSMetalRenderer.m`** — `collectsPresentStatistics`
+  turns the upload-to-screen measurement on without SPICE_DEBUG, and
+  `presentedFrameCount` / `missedFrameCount` / `presentLatencySum` expose running
+  totals; the once-a-second log stays SPICE_DEBUG only.
+
 ## Build integration (spice-mac additions)
 
 - **`Package.swift`** — compiles against the headers `scripts/build-deps.sh` installs

@@ -117,6 +117,10 @@ NS_ASSUME_NONNULL_END
     CFTimeInterval _presentSum, _presentMax, _presentReport;
 }
 
+@synthesize presentedFrameCount = _presentedFrameCount;
+@synthesize missedFrameCount = _missedFrameCount;
+@synthesize presentLatencySum = _presentLatencySum;
+
 @synthesize device = _device;
 @synthesize commandQueue = _commandQueue;
 @synthesize viewportOrigin = _viewportOrigin;
@@ -298,12 +302,15 @@ static BOOL presentStatsEnabled(void)
 
     if (latency < 0) {
         _presentMissed++;
+        _missedFrameCount++;
     } else {
         _presentCount++;
         _presentSum += latency;
         _presentMax = MAX(_presentMax, latency);
+        _presentedFrameCount++;
+        _presentLatencySum += latency;
     }
-    if (now - _presentReport >= 1.0) {
+    if (presentStatsEnabled() && now - _presentReport >= 1.0) {
         NSLog(@"[CocoaSpice] present: %lu frames (%lu not shown), upload to screen avg %.1f max %.1f ms",
               (unsigned long)_presentCount, (unsigned long)_presentMissed,
               _presentCount ? 1000 * _presentSum / _presentCount : 0, 1000 * _presentMax);
@@ -341,7 +348,7 @@ static BOOL presentStatsEnabled(void)
 
     CFTimeInterval contentStamp = self.contentStamp;
     self.contentStamp = 0;
-    if (contentStamp > 0 && presentStatsEnabled()) {
+    if (contentStamp > 0 && (presentStatsEnabled() || self.collectsPresentStatistics)) {
         [currentDrawable addPresentedHandler:^(id<MTLDrawable> drawable) {
             CFTimeInterval presented = drawable.presentedTime;
             dispatch_async(dispatch_get_main_queue(), ^{

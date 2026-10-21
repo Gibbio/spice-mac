@@ -17,6 +17,12 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
     private let statusLabel = NSTextField(labelWithString: "Connecting…")
     private var cancellables = Set<AnyCancellable>()
 
+    /// View ▸ Show Statistics, refreshed once a second while shown and connected.
+    private let statisticsOverlay = StatisticsOverlayView()
+    private var statisticsTimer: Timer?
+    private var statisticsFormatter = StatisticsFormatter()
+    private var isConnected = false
+
     /// Called when the window closes so the app can drop its reference.
     var onClose: (() -> Void)?
 
@@ -60,6 +66,7 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
         setupViews()
         wireClient()
         wireNotifications()
+        applyVideoPreferences()
     }
 
     deinit {
@@ -93,6 +100,9 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
         statusLabel.font = .systemFont(ofSize: 15)
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         containerView.addSubview(statusLabel)
+        statisticsOverlay.autoresizingMask = [.maxXMargin, .minYMargin]   // stays top-left
+        statisticsOverlay.isHidden = true
+        containerView.addSubview(statisticsOverlay)
         NSLayoutConstraint.activate([
             statusLabel.centerXAnchor.constraint(equalTo: containerView.centerXAnchor),
             statusLabel.centerYAnchor.constraint(equalTo: containerView.centerYAnchor),
@@ -148,6 +158,72 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
             object: nil, queue: .main) { [weak self] _ in
             self?.screenChanged(after: 0.6)
         })
+        notificationObservers.append(center.addObserver(
+            forName: .videoSettingsChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.applyVideoPreferences()
+        })
+        notificationObservers.append(center.addObserver(
+            forName: .showStatisticsChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.updateStatisticsOverlay()
+        })
+    }
+
+    /// Connection ▸ Prefer H.264 Video and Video Delay, unless the launch
+    /// environment sets them. With H.264 off nothing is asked for at connect (the
+    /// server's own order puts MJPEG first); turned off later, it asks for MJPEG
+    /// first again. SpiceClient sends only what changed.
+    private func applyVideoPreferences() {
+        if !Preferences.videoCodecsFromEnvironment {
+            if Preferences.preferH264Video {
+                client.preferredVideoCodecs = [.H264, .MJPEG]
+            } else if client.preferredVideoCodecs != nil {
+                client.preferredVideoCodecs = [.MJPEG]
+            }
+        }
+        if !Preferences.videoDelayFromEnvironment {
+            client.streamPlayoutDelay = Preferences.videoDelay.rawValue
+        }
+    }
+
+    // MARK: - Statistics overlay
+
+    private func updateStatisticsOverlay() {
+        let show = Preferences.showStatistics && isConnected
+        statisticsOverlay.isHidden = !show
+        displayView.collectsPresentStatistics = show
+        if show, statisticsTimer == nil {
+            statisticsFormatter = StatisticsFormatter()
+            setStatisticsText("Collecting statistics…")
+            // .common, so it keeps ticking during live resize and menu tracking.
+            let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.refreshStatistics() }
+            RunLoop.main.add(timer, forMode: .common)
+            statisticsTimer = timer
+            refreshStatistics()
+        } else if !show {
+            statisticsTimer?.invalidate()
+            statisticsTimer = nil
+        }
+    }
+
+    private func refreshStatistics() {
+        client.readStatistics { [weak self] statistics in
+            guard let self, self.statisticsTimer != nil else { return }
+            let sample = StatisticsFormatter.Sample(
+                time: CACurrentMediaTime(),
+                statistics: statistics,
+                present: self.displayView.presentTotals,
+                guestSize: self.displayView.attachedDisplay?.displaySize ?? .zero,
+                agentConnected: self.client.agentConnected)
+            self.setStatisticsText(self.statisticsFormatter.text(for: sample))
+        }
+    }
+
+    private func setStatisticsText(_ text: String) {
+        statisticsOverlay.text = text
+        let size = statisticsOverlay.fittingTextSize
+        let bounds = containerView.bounds
+        statisticsOverlay.frame = NSRect(x: 12, y: bounds.height - size.height - 12,
+                                         width: size.width, height: size.height)
     }
 
     private func attachDisplay(_ display: CSDisplay) {
@@ -192,6 +268,8 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
             showStatus("Connection failed.\n\(message)")
         }
         window?.title = title(for: status)
+        isConnected = status == .connected
+        updateStatisticsOverlay()
     }
 
     private func title(for status: SpiceClient.Status) -> String {
@@ -368,6 +446,8 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
     func windowWillClose(_ notification: Notification) {
         pendingResolutionRequest?.cancel()
         pendingResolutionRequest = nil
+        statisticsTimer?.invalidate()
+        statisticsTimer = nil
         for observer in notificationObservers { NotificationCenter.default.removeObserver(observer) }
         notificationObservers.removeAll()
         displayView.router.releaseAll()

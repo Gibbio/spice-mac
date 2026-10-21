@@ -16,6 +16,7 @@
 
 #import "CocoaSpice.h"
 #import "CSConnection+Proxmox.h" // spice-mac fork addition
+#import "CSConnection+Streaming.h" // spice-mac fork addition
 #import "CSChannel+Protected.h"
 #import "CSCursor+Protected.h"
 #import "CSDisplay+Protected.h"
@@ -29,6 +30,7 @@
 #import <glib.h>
 #import <spice-client.h>
 #import <spice/vd_agent.h>
+#import <netinet/tcp.h>
 
 @interface CSConnection ()
 
@@ -39,7 +41,43 @@
 @property (nonatomic, readwrite) SpiceSession *spiceSession;
 @property (nonatomic, readwrite) SpiceMainChannel *spiceMain;
 @property (nonatomic, readwrite) SpiceAudio *spiceAudio;
+// spice-mac: storage for CSConnection (Streaming)
+@property (atomic, copy, nullable) NSArray<NSNumber *> *videoCodecsSetting;
+@property (atomic) NSInteger playoutDelaySetting;
 
+@end
+
+// spice-mac fork addition: see CSConnection+Streaming.h
+@interface CSStreamStatistics ()
+@property (nonatomic, readwrite) NSUInteger streamID;
+@property (nonatomic, readwrite) CSVideoCodec codec;
+@property (nonatomic, readwrite, copy) NSString *decoder;
+@property (nonatomic, readwrite) CGSize size;
+@property (nonatomic, readwrite) NSUInteger framesReceived;
+@property (nonatomic, readwrite) NSUInteger framesShown;
+@property (nonatomic, readwrite) NSUInteger framesLate;
+@property (nonatomic, readwrite) NSUInteger framesDropped;
+@property (nonatomic, readwrite) NSInteger playoutDelay;
+@property (nonatomic, readwrite) NSInteger playoutTarget;
+@property (nonatomic, readwrite) BOOL audioSync;
+@end
+
+@implementation CSStreamStatistics
+@end
+
+@interface CSConnectionStatistics ()
+@property (nonatomic, readwrite) NSDictionary<NSString *, NSNumber *> *bytesReceived;
+@property (nonatomic, readwrite) NSInteger roundTripTime;
+@property (nonatomic, readwrite, copy, nullable) NSString *tlsVersion;
+@property (nonatomic, readwrite, copy, nullable) NSString *tlsCipher;
+@property (nonatomic, readwrite) BOOL clientMouseMode;
+@property (nonatomic, readwrite) BOOL audioPlaying;
+@property (nonatomic, readwrite, copy, nullable) NSString *audioCodec;
+@property (nonatomic, readwrite) NSInteger audioDelay;
+@property (nonatomic, readwrite) NSArray<CSStreamStatistics *> *streams;
+@end
+
+@implementation CSConnectionStatistics
 @end
 
 @implementation CSConnection
@@ -178,6 +216,46 @@ static void cs_port_opened(SpiceChannel *channel, GParamSpec *pspec,
     }
 }
 
+// spice-mac: apply CSConnection (Streaming)'s video settings to a display
+// channel; SPICE thread. Before the channel is open the server's capabilities
+// are unknown and spice-gtk refuses the codecs: cs_display_channel_event()
+// applies them again then.
+static void cs_apply_video_settings(CSConnection *self, SpiceChannel *channel,
+                                    BOOL applyCodecs, BOOL applyPlayout)
+{
+    NSArray<NSNumber *> *codecs = self.videoCodecsSetting;
+    NSInteger delay = self.playoutDelaySetting;
+
+    if (applyCodecs && codecs.count > 0) {
+        gint types[SPICE_VIDEO_CODEC_TYPE_ENUM_END];
+        gsize n = 0;
+        GError *err = NULL;
+
+        for (NSNumber *codec in codecs) {
+            if (n < G_N_ELEMENTS(types)) {
+                types[n++] = (gint)codec.integerValue;
+            }
+        }
+        if (!spice_display_channel_change_preferred_video_codec_types(channel, types, n, &err)) {
+            SPICE_DEBUG("[CocoaSpice] preferred video codecs not set: %s", err->message);
+            g_clear_error(&err);
+        }
+    }
+    if (applyPlayout && delay >= 0) {
+        spice_display_channel_set_stream_playout(channel, (gint)delay);
+    }
+}
+
+static void cs_display_channel_event(SpiceChannel *channel, SpiceChannelEvent event,
+                                     gpointer data)
+{
+    CSConnection *self = (__bridge CSConnection *)data;
+
+    if (event == SPICE_CHANNEL_OPENED) {
+        cs_apply_video_settings(self, channel, YES, YES);
+    }
+}
+
 static void cs_channel_new(SpiceSession *s, SpiceChannel *channel, gpointer data)
 {
     CSConnection *self = (__bridge CSConnection *)data;
@@ -204,6 +282,8 @@ static void cs_channel_new(SpiceSession *s, SpiceChannel *channel, gpointer data
         [self.mutableChannels addObject:display];
         g_signal_connect_after(channel, "notify::monitors",
                                G_CALLBACK(cs_display_monitors), (__bridge void *)self);
+        g_signal_connect(channel, "channel-event",
+                         G_CALLBACK(cs_display_channel_event), (__bridge void *)self);
         display.isEnabled = YES;
         // find and connect to any existing cursor channel
         for (CSChannel *candidate in self.channels) {
@@ -280,6 +360,7 @@ static void cs_channel_destroy(SpiceSession *s, SpiceChannel *channel, gpointer 
     if (SPICE_IS_DISPLAY_CHANNEL(channel)) {
         SPICE_DEBUG("zap display channel (#%d)", chid);
         g_signal_handlers_disconnect_by_func(channel, G_CALLBACK(cs_display_monitors), (__bridge void *)self);
+        g_signal_handlers_disconnect_by_func(channel, G_CALLBACK(cs_display_channel_event), (__bridge void *)self);
     }
     
     if (SPICE_IS_INPUTS_CHANNEL(channel)) {
@@ -425,6 +506,7 @@ end:
 
 - (void)finishInit {
     SPICE_DEBUG("[CocoaSpice] %s:%d", __FUNCTION__, __LINE__);
+    self.playoutDelaySetting = -1; // spice-mac: see CSConnection (Streaming)
     g_signal_connect(self.spiceSession, "channel-new",
                      G_CALLBACK(cs_channel_new), (__bridge void *)self);
     g_signal_connect(self.spiceSession, "channel-destroy",
@@ -511,6 +593,126 @@ end:
                      "verify", SPICE_SESSION_VERIFY_SUBJECT,
                      NULL);
     }
+}
+
+#pragma mark - Streaming (spice-mac fork addition)
+
+- (NSArray<NSNumber *> *)preferredVideoCodecs {
+    return self.videoCodecsSetting;
+}
+
+- (void)setPreferredVideoCodecs:(NSArray<NSNumber *> *)codecs {
+    self.videoCodecsSetting = codecs;
+    [self applyVideoSettingsToOpenDisplaysWithCodecs:YES playout:NO];
+}
+
+- (NSInteger)streamPlayoutDelay {
+    return self.playoutDelaySetting;
+}
+
+- (void)setStreamPlayoutDelay:(NSInteger)milliseconds {
+    self.playoutDelaySetting = milliseconds;
+    [self applyVideoSettingsToOpenDisplaysWithCodecs:NO playout:YES];
+}
+
+- (void)applyVideoSettingsToOpenDisplaysWithCodecs:(BOOL)codecs playout:(BOOL)playout {
+    __weak CSConnection *weakSelf = self;
+    [CSMain.sharedInstance asyncWith:^{
+        CSConnection *strongSelf = weakSelf;
+        for (CSChannel *channel in strongSelf.channels) {
+            if ([channel isKindOfClass:CSDisplay.class]) {
+                cs_apply_video_settings(strongSelf, channel.spiceChannel, codecs, playout);
+            }
+        }
+    }];
+}
+
+/// The smoothed TCP round-trip time of a channel's socket in ms, or -1
+static NSInteger cs_channel_round_trip_time(SpiceChannel *channel)
+{
+    GSocket *socket = NULL;
+    struct tcp_connection_info info;
+    socklen_t len = sizeof(info);
+    NSInteger rtt = -1;
+
+    g_object_get(channel, "socket", &socket, NULL);
+    if (socket == NULL) {
+        return -1;
+    }
+    if (getsockopt(g_socket_get_fd(socket), IPPROTO_TCP, TCP_CONNECTION_INFO, &info, &len) == 0) {
+        rtt = info.tcpi_srtt;
+    }
+    g_object_unref(socket);
+    return rtt;
+}
+
+- (void)readStatisticsWithCompletion:(void (^)(CSConnectionStatistics *))completion {
+    SpiceSession *session = g_object_ref(self.spiceSession);
+
+    [CSMain.sharedInstance asyncWith:^{
+        CSConnectionStatistics *stats = [CSConnectionStatistics new];
+        NSMutableDictionary<NSString *, NSNumber *> *bytes = [NSMutableDictionary dictionary];
+        NSMutableArray<CSStreamStatistics *> *streams = [NSMutableArray array];
+        GList *channels = spice_session_get_channels(session);
+
+        stats.roundTripTime = -1;
+        for (GList *l = channels; l != NULL; l = l->next) {
+            SpiceChannel *channel = l->data;
+            gint type = 0;
+            gulong read = 0;
+
+            g_object_get(channel, "channel-type", &type, "total-read-bytes", &read, NULL);
+            NSString *name = @(spice_channel_type_to_string(type) ?: "other");
+            bytes[name] = @(bytes[name].unsignedLongLongValue + read);
+
+            if (SPICE_IS_MAIN_CHANNEL(channel)) {
+                const gchar *version = NULL, *cipher = NULL;
+                gint mouseMode = 0;
+
+                if (spice_channel_get_tls_info(channel, &version, &cipher)) {
+                    stats.tlsVersion = version ? @(version) : nil;
+                    stats.tlsCipher = cipher ? @(cipher) : nil;
+                }
+                g_object_get(channel, "mouse-mode", &mouseMode, NULL);
+                stats.clientMouseMode = mouseMode == SPICE_MOUSE_MODE_CLIENT;
+                stats.roundTripTime = cs_channel_round_trip_time(channel);
+            } else if (SPICE_IS_DISPLAY_CHANNEL(channel)) {
+                SpiceDisplayStreamStats st[16];
+                guint n = spice_display_channel_get_stream_stats(channel, st, G_N_ELEMENTS(st));
+
+                for (guint i = 0; i < n; i++) {
+                    CSStreamStatistics *stream = [CSStreamStatistics new];
+                    stream.streamID = st[i].id;
+                    stream.codec = st[i].codec_type;
+                    stream.decoder = st[i].decoder ? @(st[i].decoder) : @"?";
+                    stream.size = CGSizeMake(st[i].width, st[i].height);
+                    stream.framesReceived = st[i].frames_received;
+                    stream.framesShown = st[i].frames_shown;
+                    stream.framesLate = st[i].frames_late;
+                    stream.framesDropped = st[i].frames_dropped;
+                    stream.playoutDelay = st[i].playout_delay;
+                    stream.playoutTarget = st[i].playout_target;
+                    stream.audioSync = st[i].audio_sync;
+                    [streams addObject:stream];
+                }
+            } else if (SPICE_IS_PLAYBACK_CHANNEL(channel)) {
+                SpicePlaybackStats playback;
+
+                spice_playback_channel_get_stats(SPICE_PLAYBACK_CHANNEL(channel), &playback);
+                stats.audioPlaying = playback.active;
+                stats.audioCodec = playback.mode == SPICE_AUDIO_DATA_MODE_OPUS ? @"Opus" :
+                                   playback.mode == SPICE_AUDIO_DATA_MODE_RAW ? @"raw PCM" : @"?";
+                stats.audioDelay = playback.delay;
+            }
+        }
+        g_list_free(channels);
+        g_object_unref(session);
+        stats.bytesReceived = bytes;
+        stats.streams = streams;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(stats);
+        });
+    }];
 }
 
 @end

@@ -69,6 +69,15 @@ enum MainMenu {
             + "Takes effect on the next connection. Turn off for untrusted VMs."
         connMenu.addItem(shareClipboard)
         connMenu.addItem(.separator())
+        let preferH264 = NSMenuItem(title: "Prefer H.264 Video",
+                                    action: #selector(AppDelegate.togglePreferH264Video(_:)), keyEquivalent: "")
+        preferH264.toolTip = "Ask the server to stream video as H.264, decoded in hardware on the Mac, "
+            + "instead of MJPEG. Applies at once. The Proxmox node encodes it: in software unless it "
+            + "is set up for Quick Sync, and only with gstreamer1.0-plugins-ugly installed; "
+            + "otherwise it keeps sending MJPEG."
+        connMenu.addItem(preferH264)
+        connMenu.addItem(videoDelayMenuItem())
+        connMenu.addItem(.separator())
         // USB submenu, populated dynamically by the window controller.
         let usbItem = NSMenuItem(title: "USB Devices", action: nil, keyEquivalent: "")
         let usbMenu = NSMenu(title: "USB Devices")
@@ -91,6 +100,11 @@ enum MainMenu {
                                     action: #selector(AppDelegate.toggleHideMacCursor(_:)), keyEquivalent: "")
         hideCursor.state = Preferences.hideHostCursor ? .on : .off
         viewMenu.addItem(hideCursor)
+        let statistics = NSMenuItem(title: "Show Statistics",
+                                    action: #selector(AppDelegate.toggleShowStatistics(_:)), keyEquivalent: "i")
+        statistics.keyEquivalentModifierMask = [.control, .command]
+        statistics.toolTip = "Show bandwidth, latency, video streams and audio over the display."
+        viewMenu.addItem(statistics)
 
         // Window menu
         let windowItem = NSMenuItem()
@@ -102,6 +116,21 @@ enum MainMenu {
         NSApp.windowsMenu = windowMenu
 
         return mainMenu
+    }
+
+    /// Connection ▸ Video Delay, app-wide like the other preferences.
+    private static func videoDelayMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Video Delay", action: nil, keyEquivalent: "")
+        let menu = NSMenu(title: "Video Delay")
+        item.submenu = menu
+        for delay in VideoDelay.allCases {
+            let delayItem = NSMenuItem(title: delay.title,
+                                       action: #selector(AppDelegate.setVideoDelay(_:)), keyEquivalent: "")
+            delayItem.tag = delay.rawValue
+            delayItem.toolTip = delay.toolTip
+            menu.addItem(delayItem)
+        }
+        return item
     }
 
     /// The USB submenu, populated dynamically by the front `SpiceWindowController`.

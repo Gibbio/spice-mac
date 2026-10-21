@@ -46,6 +46,26 @@ public final class SpiceClient: NSObject, ObservableObject {
     /// USB redirection manager for the active connection, if any.
     public var usbManager: CSUSBManager? { connection?.usbManager }
 
+    /// The video codecs to ask the server for, first one preferred; nil leaves the
+    /// server's own order. Set before `connect()` or while connected: a change
+    /// applies at once, and makes the server restart its running streams.
+    public var preferredVideoCodecs: [CSVideoCodec]? {
+        didSet {
+            guard preferredVideoCodecs != oldValue else { return }
+            connection?.preferredVideoCodecs = preferredVideoCodecs?.map { NSNumber(value: $0.rawValue) }
+        }
+    }
+
+    /// How many ms after arrival a streamed frame is shown while no audio plays;
+    /// nil keeps `SPICE_STREAM_PLAYOUT_MS` (default 50). Applies like
+    /// `preferredVideoCodecs`, from the next frame on.
+    public var streamPlayoutDelay: Int? {
+        didSet {
+            guard streamPlayoutDelay != oldValue else { return }
+            connection?.streamPlayoutDelay = streamPlayoutDelay ?? -1
+        }
+    }
+
     private let parameters: SpiceConnectionParameters
     private let pasteboard: SpicePasteboardBridge
     /// Whether a connection attempt has already been made. The Proxmox ticket is
@@ -119,6 +139,14 @@ public final class SpiceClient: NSObject, ObservableObject {
                           certSubject: parameters.certSubject)
         }
 
+        // Applied by CocoaSpice to each display channel as it opens.
+        if let preferredVideoCodecs {
+            conn.preferredVideoCodecs = preferredVideoCodecs.map { NSNumber(value: $0.rawValue) }
+        }
+        if let streamPlayoutDelay {
+            conn.streamPlayoutDelay = streamPlayoutDelay
+        }
+
         // Clipboard sharing (opt-out; requires the guest vdagent to take effect).
         conn.session.shareClipboard = shareClipboard
         conn.session.pasteboardDelegate = pasteboard
@@ -136,6 +164,12 @@ public final class SpiceClient: NSObject, ObservableObject {
         if shareClipboard {
             pasteboard.startMonitoring()
         }
+    }
+
+    /// A statistics snapshot of the connection, delivered on the main queue; never
+    /// called back when not connected.
+    public func readStatistics(_ completion: @escaping (CSConnectionStatistics) -> Void) {
+        connection?.readStatistics(completion: completion)
     }
 
     /// Request disconnect. Final teardown is reported via `spiceDisconnected:`.

@@ -58,6 +58,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         sender.state = Preferences.trashConnectionFileAfterUse ? .on : .off
     }
 
+    // The video settings apply to every open window, which observes
+    // .videoSettingsChanged.
+    @objc func togglePreferH264Video(_ sender: NSMenuItem) {
+        Preferences.preferH264Video.toggle()
+    }
+
+    @objc func setVideoDelay(_ sender: NSMenuItem) {
+        guard let delay = VideoDelay(rawValue: sender.tag) else { return }
+        Preferences.videoDelay = delay
+    }
+
+    @objc func toggleShowStatistics(_ sender: NSMenuItem) {
+        Preferences.showStatistics.toggle()
+    }
+
     // View ▸ Zoom is per-window and lives on SpiceWindowController, reached down the
     // responder chain — see the Zoom menu section there.
 
@@ -69,6 +84,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             menuItem.state = Preferences.shareClipboard ? .on : .off
         case #selector(toggleTrashConnectionFile(_:)):
             menuItem.state = Preferences.trashConnectionFileAfterUse ? .on : .off
+        case #selector(togglePreferH264Video(_:)):
+            menuItem.state = Preferences.preferH264Video ? .on : .off
+            return !Preferences.videoCodecsFromEnvironment
+        case #selector(setVideoDelay(_:)):
+            menuItem.state = menuItem.tag == Preferences.videoDelay.rawValue ? .on : .off
+            return !Preferences.videoDelayFromEnvironment
+        case #selector(toggleShowStatistics(_:)):
+            menuItem.state = Preferences.showStatistics ? .on : .off
         default:
             break
         }

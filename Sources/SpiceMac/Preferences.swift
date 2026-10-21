@@ -51,6 +51,84 @@ enum Preferences {
     }
 }
 
+extension Preferences {
+    private static let preferH264VideoKey = "PreferH264Video"
+
+    /// Whether to ask the server for H.264 video, decoded by VideoToolbox, instead
+    /// of MJPEG. Default off: the node then does the encoding — in software (x264,
+    /// from gstreamer1.0-plugins-ugly) unless set up for VA-API, see
+    /// docs/server-side-video.md — and a node without an H.264 encoder keeps
+    /// sending MJPEG. Applies to open connections at once; changing it posts
+    /// `.videoSettingsChanged`.
+    static var preferH264Video: Bool {
+        get { UserDefaults.standard.bool(forKey: preferH264VideoKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: preferH264VideoKey)
+            NotificationCenter.default.post(name: .videoSettingsChanged, object: nil)
+        }
+    }
+
+    private static let videoDelayKey = "VideoDelay"
+
+    /// How long after arrival a streamed frame is shown while no audio plays.
+    /// Applies like `preferH264Video`.
+    static var videoDelay: VideoDelay {
+        get { VideoDelay(rawValue: UserDefaults.standard.integer(forKey: videoDelayKey)) ?? .standard }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: videoDelayKey)
+            NotificationCenter.default.post(name: .videoSettingsChanged, object: nil)
+        }
+    }
+
+    /// SPICE_PREFERRED_VIDEO_CODECS / SPICE_STREAM_PLAYOUT_MS in the launch
+    /// environment take precedence over the two settings above (for testing); the
+    /// menu items are disabled then.
+    static let videoCodecsFromEnvironment = ProcessInfo.processInfo.environment["SPICE_PREFERRED_VIDEO_CODECS"] != nil
+    static let videoDelayFromEnvironment = ProcessInfo.processInfo.environment["SPICE_STREAM_PLAYOUT_MS"] != nil
+
+    private static let showStatisticsKey = "ShowStatistics"
+
+    /// Whether each window shows the statistics overlay. Default off. Changing it
+    /// posts `.showStatisticsChanged`.
+    static var showStatistics: Bool {
+        get { UserDefaults.standard.bool(forKey: showStatisticsKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: showStatisticsKey)
+            NotificationCenter.default.post(name: .showStatisticsChanged, object: nil)
+        }
+    }
+}
+
+/// Connection ▸ Video Delay: how long after arrival a streamed frame is shown
+/// while no audio is playing (spice-gtk patch 0007), in ms. Longer absorbs more
+/// network jitter, shorter lags less. With audio playing, the video follows the
+/// audio instead, for lip sync.
+enum VideoDelay: Int, CaseIterable {
+    case lowest = 30
+    case standard = 50
+    case smoother = 80
+
+    var title: String {
+        switch self {
+        case .lowest:   return "30 ms (Lowest Latency)"
+        case .standard: return "50 ms (Default)"
+        case .smoother: return "80 ms (Smoother)"
+        }
+    }
+
+    /// The median click-to-screen time we measured on a LAN, MJPEG, 1280×720.
+    var toolTip: String {
+        switch self {
+        case .lowest:   return "Click to screen in our LAN test: median 128 ms."
+        case .standard: return "Click to screen in our LAN test: median 154 ms."
+        case .smoother: return "Click to screen in our LAN test: median 185 ms. "
+            + "More room for network jitter, e.g. on Wi-Fi."
+        }
+    }
+}
+
 extension Notification.Name {
     static let hideHostCursorChanged = Notification.Name("SpiceMac.hideHostCursorChanged")
+    static let videoSettingsChanged = Notification.Name("SpiceMac.videoSettingsChanged")
+    static let showStatisticsChanged = Notification.Name("SpiceMac.showStatisticsChanged")
 }

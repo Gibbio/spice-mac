@@ -150,8 +150,8 @@ sources into `Sysroot/` (arm64, macOS 12+, every library `@rpath`-relative):
   any library that references a path outside `@rpath` or the OS.
 - **Patched where needed.** `deps/patches/<package>/` holds the patches applied on
   top of upstream. For spice-gtk: UTM's GMainContext support (CocoaSpice relies on
-  it), a macOS build fix, the VideoToolbox H.264 decoder and our video timing
-  fixes — see [deps/README.md](deps/README.md).
+  it), a macOS build fix, the VideoToolbox H.264 decoder, our video timing
+  fixes and what the menu and statistics need — see [deps/README.md](deps/README.md).
 - **No GPL.** LGPL / Apache-2.0 / BSD / MIT / ISC only — see
   [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt).
 
@@ -199,9 +199,10 @@ only when it can see the video as one region:
 
 Streams arrive as MJPEG by default. SpiceMac can also decode **H.264** in hardware
 (VideoToolbox) — in our 720p30 test (debug logging on) ~11% of a core against ~26%
-for MJPEG. It asks for it only when started with
-`SPICE_PREFERRED_VIDEO_CODECS=h264,mjpeg` — opt-in, because the work moves to the
-node: Proxmox's spice-server encodes H.264 in software (x264, from
+for MJPEG. Turn it on with **Connection ▸ Prefer H.264 Video**, which applies at
+once (`SPICE_PREFERRED_VIDEO_CODECS=h264,mjpeg` at launch overrides it). It is
+off by default because the work moves to the node: Proxmox's spice-server
+encodes H.264 in software (x264, from
 `gstreamer1.0-plugins-ugly`, not installed by default), about a third of a core
 per stream in our tests against 5–9% for MJPEG.
 [docs/server-side-video.md](docs/server-side-video.md) describes what the node
@@ -210,14 +211,33 @@ of a core.
 
 **Latency.** The server keeps the client's clock 400 ms behind its own, as room to
 line video up with buffered audio. Unless the guest is playing sound, SpiceMac
-shows each frame about 50 ms after it arrives instead (`SPICE_STREAM_PLAYOUT_MS`,
-default `50`; `0` restores the stock behaviour). Measured with a headless client
-on the same SPICE library (LAN, Windows 11 guest, MJPEG, 1280×720), a click
-reached the client's framebuffer in a median 154 ms, against ~500 ms stock.
+shows each frame about 50 ms after it arrives instead. Measured with a headless
+client on the same SPICE library (LAN, Windows 11 guest, MJPEG, 1280×720), a
+click reached the client's framebuffer in a median 154 ms, against ~500 ms stock.
+**Connection ▸ Video Delay** trades latency for room for network jitter: 30 ms
+(median 128 ms in that test), 50 ms (the default) or 80 ms (185 ms).
+`SPICE_STREAM_PLAYOUT_MS` at launch overrides it, and `0` restores the stock
+behaviour.
 Sounds shorter than a few seconds, such as notifications, leave the video's timing
 alone. Longer ones hand the video back to the server's timing, lined up with the
 audio (about 220 ms after arrival in that test): some 3–4 s into the sound, after
 a single pause of about that length.
+
+**Statistics.** **View ▸ Show Statistics** (⌃⌘I) lays a panel over the display,
+refreshed once a second:
+
+- **Network:** bandwidth received, total and by channel; the TCP round trip (to
+  the node's spiceproxy); the TLS version and cipher.
+- **Display:** the guest resolution, mouse mode and agent; how many frames the
+  Mac draws per second and how long an uploaded frame takes to reach the screen.
+- **Video:** each stream's codec, decoder (VideoToolbox, built-in MJPEG or
+  GStreamer) and size; frames per second received and shown; frames late and
+  dropped; how long after arrival frames are shown, and which clock they follow.
+- **Audio:** the codec (Opus or raw), whether it plays, and the output delay.
+
+It answers "is this H.264?" and "is it the network or the server?" at a glance.
+The time from the guest to the client is not in it: the server's timestamps do
+not tell it.
 
 ## Verifying the tested components
 

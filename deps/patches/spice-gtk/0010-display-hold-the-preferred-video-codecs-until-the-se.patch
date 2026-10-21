@@ -1,0 +1,152 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Er Gibbio <gibbio@pm.me>
+Date: Tue, 20 Oct 2026 19:52:45 +0200
+Subject: [PATCH 10/10] display: hold the preferred video codecs until the
+ server's first MARK
+
+spice-server (0.15.2 up to master) handles SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_
+CODEC_TYPE by stopping every running stream (video_stream_detach_and_stop), and
+one that arrives together with DISPLAY_INIT is handled in the same receive()
+call, in display_channel_client_wait_for_init(), before dcc_create_all_streams()
+has set our stream agents up. If video is already playing when we connect, the
+clip item it queues for us carries a NULL client, and freeing it segfaults the
+server's worker in RedChannelClient::get_channel() (~VideoStreamClipItem),
+killing QEMU. SPICE_PREFERRED_VIDEO_CODECS was sent right after DISPLAY_INIT,
+and so is an application's preference set when the channel opens.
+
+Reproduced against spice-server master's test-display-streaming: the server
+crashed 17 ms after the preference arrived, with exactly the backtrace above.
+Reported upstream as https://gitlab.freedesktop.org/spice/spice/-/issues/99;
+not fixed in master ad4b603d nor in the open MR !257 (c363f0dc).
+
+Keep the preference in the channel and send it at the first MARK: the server
+queues MARK right before setting the agents up, in the same call, or when the
+primary surface appears later. After that it is sent at once, and again after
+the channel reconnects, since the server keeps it per client. It now goes out
+with spice_msg_out_send(), which may be called from any context: applications
+change it from the main context, not from the channel's coroutine.
+---
+ src/channel-display.c | 67 ++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 56 insertions(+), 11 deletions(-)
+
+diff --git a/src/channel-display.c b/src/channel-display.c
+index 0d7df71..13deae1 100644
+--- a/src/channel-display.c
++++ b/src/channel-display.c
+@@ -90,6 +90,11 @@ struct _SpiceDisplayChannelPrivate {
+     gint32                      playout_shift;
+     gint32                      playout_window_min;
+     gint64                      playout_window_end;
++    /* the preferred video codecs, sent once the server is ready for them: see
++     * spice_display_send_client_preferred_video_codecs() */
++    gint                        preferred_codecs[SPICE_VIDEO_CODEC_TYPE_ENUM_END];
++    gsize                       n_preferred_codecs;
++    gboolean                    got_first_mark;
+     SpiceGlScanout              scanout_ret;
+     SpiceGlScanout2             scanout;
+ };
+@@ -277,6 +282,8 @@ static void spice_display_channel_reset(SpiceChannel *channel, gboolean migratin
+     /* palettes, images, and glz_window are cleared in the session */
+     clear_streams(channel);
+     clear_surfaces(channel, TRUE);
++    /* the preferred video codecs are sent again after the next first MARK */
++    SPICE_DISPLAY_CHANNEL(channel)->priv->got_first_mark = FALSE;
+ 
+     SPICE_CHANNEL_CLASS(spice_display_channel_parent_class)->channel_reset(channel, migrating);
+ }
+@@ -637,29 +644,63 @@ void spice_display_channel_change_preferred_compression(SpiceChannel *channel, g
+     spice_msg_out_send_internal(out);
+ }
+ 
+-static void spice_display_send_client_preferred_video_codecs(SpiceChannel *channel,
+-                                                             const gint *codecs, gsize ncodecs)
++/* main or coroutine context */
++static void display_send_preferred_codecs(SpiceChannel *channel)
+ {
++    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+     SpiceMsgOut *out;
+     SpiceMsgcDisplayPreferredVideoCodecType *msg;
+-    int i;
++    gsize i;
+ 
++    if (!spice_channel_test_capability(channel, SPICE_DISPLAY_CAP_PREF_VIDEO_CODEC_TYPE)) {
++        return;
++    }
+     msg = g_malloc0(sizeof(SpiceMsgcDisplayPreferredVideoCodecType) +
+-                    (sizeof(msg->codecs[0]) * ncodecs));
+-    msg->num_of_codecs = ncodecs;
++                    (sizeof(msg->codecs[0]) * c->n_preferred_codecs));
++    msg->num_of_codecs = c->n_preferred_codecs;
+ 
+     /* cannot memcpy because codecs is gint, but msg->codecs is uint8_t
+      * but safe because SpiceVideoCodecType <= 255 */
+-    for (i = 0; i < ncodecs; i++) {
+-        msg->codecs[i] = codecs[i];
++    for (i = 0; i < c->n_preferred_codecs; i++) {
++        msg->codecs[i] = c->preferred_codecs[i];
+     }
+ 
+     out = spice_msg_out_new(channel, SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_CODEC_TYPE);
+     out->marshallers->msgc_display_preferred_video_codec_type(out->marshaller, msg);
+-    spice_msg_out_send_internal(out);
++    /* not spice_msg_out_send_internal(): applications call this from the main
++     * context, not the channel's coroutine */
++    spice_msg_out_send(out);
+     g_free(msg);
+ }
+ 
++/* main or coroutine context
++ *
++ * The preference is kept, and sent once the server has sent its first MARK (and
++ * again after the channel reconnects). spice-server (0.15.2 up to master)
++ * handles it by stopping every running stream, and one that arrives with our
++ * DISPLAY_INIT is handled before the server has set up our stream agents: if a
++ * video is playing when we connect, a clip item it queues for us has a NULL
++ * client, and the server segfaults freeing it (RedChannelClient::get_channel),
++ * taking QEMU down. The server queues MARK in the same call that sets the agents
++ * up (or when the primary surface appears), so they exist by the time we see it.
++ * https://gitlab.freedesktop.org/spice/spice/-/issues/99 */
++static void spice_display_send_client_preferred_video_codecs(SpiceChannel *channel,
++                                                             const gint *codecs, gsize ncodecs)
++{
++    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
++    gsize i;
++
++    c->n_preferred_codecs = MIN(ncodecs, G_N_ELEMENTS(c->preferred_codecs));
++    for (i = 0; i < c->n_preferred_codecs; i++) {
++        c->preferred_codecs[i] = codecs[i];
++    }
++    if (c->got_first_mark) {
++        display_send_preferred_codecs(channel);
++    } else {
++        CHANNEL_DEBUG(channel, "preferred video codecs kept until the server's first MARK");
++    }
++}
++
+ /**
+  * spice_display_change_preferred_video_codec_type: (method)
+  * @channel: (type SpiceDisplayChannel): a #SpiceDisplayChannel
+@@ -1022,9 +1063,7 @@ static void spice_display_channel_set_capabilities(SpiceChannel *channel)
+ #ifdef HAVE_VIDEOTOOLBOX
+ /* SPICE_PREFERRED_VIDEO_CODECS="h264,mjpeg" asks the server to prefer these codecs.
+  * Servers pick from their own list in order (spice:mjpeg first by default), so
+- * without it they keep sending MJPEG even to a client that decodes H.264. It is
+- * opt-in rather than automatic: spice-server 0.15.2 can crash (taking QEMU down)
+- * when a GStreamer-encoded stream is torn down. */
++ * without it they keep sending MJPEG even to a client that decodes H.264. */
+ static void display_send_preferred_codecs_from_env(SpiceChannel *channel)
+ {
+     gint codecs[SPICE_VIDEO_CODEC_TYPE_ENUM_END];
+@@ -1298,6 +1337,12 @@ static void display_handle_mark(SpiceChannel *channel, SpiceMsgIn *in)
+ 
+     c->mark = TRUE;
+     g_coroutine_signal_emit(channel, signals[SPICE_DISPLAY_MARK], 0, TRUE);
++    if (!c->got_first_mark) {
++        c->got_first_mark = TRUE;
++        if (c->n_preferred_codecs > 0) {
++            display_send_preferred_codecs(channel);
++        }
++    }
+ }
+ 
+ /* coroutine context */

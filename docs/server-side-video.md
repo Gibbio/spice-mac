@@ -30,10 +30,10 @@ Keep in mind before trying any of them:
 | 3 | + VA-API (Quick Sync), two local patches | H.264, GPU | 29.7 | 3.2 Mbit/s | 7% | 0010, 0011 |
 
 The client patches are in `deps/patches/spice-gtk/`, and current SpiceMac builds
-have them. H.264 is still opt-in: start SpiceMac with
-`SPICE_PREFERRED_VIDEO_CODECS=h264,mjpeg`, e.g.
-`open build/SpiceMac.app --env SPICE_PREFERRED_VIDEO_CODECS=h264,mjpeg conn.vv`.
-Without it the server keeps sending MJPEG at every level.
+have them. H.264 is still opt-in: turn on **Connection ▸ Prefer H.264 Video**
+(or start SpiceMac with `SPICE_PREFERRED_VIDEO_CODECS=h264,mjpeg`). Without it
+the server keeps sending MJPEG at every level. **View ▸ Show Statistics** shows
+which codec each stream really uses and how many frames get through.
 
 ## Level 0: stock Proxmox
 

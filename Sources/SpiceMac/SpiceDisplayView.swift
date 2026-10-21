@@ -15,6 +15,18 @@ final class SpiceDisplayView: MTKView {
     private var renderer: CSMetalRenderer?
     private(set) weak var attachedDisplay: CSDisplay?
 
+    /// Whether the renderer measures each frame's time from upload to the screen,
+    /// for the statistics overlay.
+    var collectsPresentStatistics = false {
+        didSet { renderer?.collectsPresentStatistics = collectsPresentStatistics }
+    }
+
+    /// The renderer's running totals of those measurements; they start again
+    /// from zero with each attached display.
+    var presentTotals: (presented: Int, missed: Int, latencySum: Double)? {
+        renderer.map { (Int($0.presentedFrameCount), Int($0.missedFrameCount), $0.presentLatencySum) }
+    }
+
     /// KVO token for the attached display's `displaySize` (guest resolution may
     /// change after the agent connects / a mode switch).
     private var displaySizeObservation: NSKeyValueObservation?
@@ -90,6 +102,7 @@ final class SpiceDisplayView: MTKView {
         detach()
         attachedDisplay = display
         let renderer = CSMetalRenderer(metalKitView: self)
+        renderer.collectsPresentStatistics = collectsPresentStatistics
         delegate = renderer
         self.renderer = renderer
         display.addRenderer(renderer)

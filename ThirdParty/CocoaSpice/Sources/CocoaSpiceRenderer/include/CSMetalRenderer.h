@@ -34,6 +34,17 @@ NS_ASSUME_NONNULL_BEGIN
 /// @param downscaler Downscaler to use
 - (void)changeUpscaler:(MTLSamplerMinMagFilter)upscaler downscaler:(MTLSamplerMinMagFilter)downscaler;
 
+/// spice-mac: measure how long each uploaded frame takes to reach the screen
+/// (also on with SPICE_DEBUG, which logs it once a second). Main thread.
+@property (nonatomic) BOOL collectsPresentStatistics;
+
+/// spice-mac: running totals of those measurements, main thread: uploaded
+/// frames that reached the screen, ones that never did, and the sum of their
+/// upload-to-screen times in seconds. Sample them to get rates and averages.
+@property (nonatomic, readonly) NSUInteger presentedFrameCount;
+@property (nonatomic, readonly) NSUInteger missedFrameCount;
+@property (nonatomic, readonly) CFTimeInterval presentLatencySum;
+
 @end
 
 NS_ASSUME_NONNULL_END

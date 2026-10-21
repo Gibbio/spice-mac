@@ -89,6 +89,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **H.264 streams fell to 3–5 fps after a while** with spice-server 0.16's
+  GStreamer rate control (seen with Quick Sync): SpiceMac reported each frame's
+  slack and the Video Delay as its margin, and the server lowered the bit rate
+  report after report while margins stayed below half the largest it had seen
+  (~150 ms in a stream's first second), or halved it when the delay was turned
+  down. The margin reported now is the default delay's, at most 50 ms; a late
+  frame still lowers it (spice-gtk patch 0016).
+- **The VideoToolbox decoder dropped frames 1–9 ms late** (one every 2–3 s on
+  the node's H.264), each a visible hitch and, reported to the server, a halved
+  bit rate. Frames up to 15 ms late are now shown (patch 0015).
 - **Resolution requests on a VM with two or more displays.** Every display channel
   was marked enabled at 0×0 when it opened, so each request listed the other
   displays at 0×0, and spice-vdagent-win rejects such a config whole, the

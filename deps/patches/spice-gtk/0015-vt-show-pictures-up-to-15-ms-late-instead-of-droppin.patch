@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Er Gibbio <gibbio@pm.me>
+Date: Wed, 21 Oct 2026 19:00:26 +0200
+Subject: [PATCH 15/15] vt: show pictures up to 15 ms late instead of dropping
+ them
+
+On the Proxmox node's H.264 streams (Quick Sync), the VideoToolbox decoder
+dropped a picture every 2-3 s, each 1-9 ms past its time: decoded just after
+it on a busy main context. Dropping one holds the previous picture for
+another frame period, a visible stutter, where showing it a few ms late is
+not. Pictures later than that are still dropped.
+---
+ src/channel-display-vt.c | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/src/channel-display-vt.c b/src/channel-display-vt.c
+index 44d75f9..360c104 100644
+--- a/src/channel-display-vt.c
++++ b/src/channel-display-vt.c
+@@ -23,7 +23,8 @@
+  * hardware decode takes a few milliseconds, the builtin MJPEG decoder decodes
+  * inline the same way — and every frame is decoded, since later frames reference
+  * earlier ones. Pictures come out as BGRA (converted by VideoToolbox) and wait in a
+- * queue for their multimedia time; late ones are dropped at display time only.
++ * queue for their multimedia time; ones more than VT_LATE_TOLERANCE_MS late are
++ * dropped at display time only.
+  */
+ #include "config.h"
+ 
+@@ -34,6 +35,12 @@
+ #include "spice-channel-priv.h"
+ #include "channel-display-priv.h"
+ 
++/* A picture this late is still shown, at once. The pictures dropped as late
++ * were 1-9 ms past their time (decoded just after it on a busy main context),
++ * and dropping one holds the previous picture on screen for another frame
++ * period, 33 ms at 30 fps: a visible stutter where a few ms late is not. */
++#define VT_LATE_TOLERANCE_MS 15
++
+ typedef struct VTPicture {
+     SpiceFrame *frame;          /* mm_time and destination of the picture */
+     CVPixelBufferRef image;     /* decoded BGRA picture */
+@@ -393,9 +400,10 @@ static void vt_decoder_schedule(VTDecoder *decoder)
+     decoder->cur = NULL;
+     do {
+         if (picture != NULL) {
+-            if (spice_mmtime_diff(time, picture->frame->mm_time) <= 0) {
++            gint32 late = spice_mmtime_diff(time, picture->frame->mm_time);
++            if (late <= VT_LATE_TOLERANCE_MS) {
+                 decoder->cur = picture;
+-                decoder->timer_id = g_spice_timeout_add(picture->frame->mm_time - time,
++                decoder->timer_id = g_spice_timeout_add(late < 0 ? -late : 0,
+                                                         vt_decoder_display_picture, decoder);
+                 break;
+             }
+-- 
+2.56.0
+

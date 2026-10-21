@@ -27,7 +27,7 @@ Keep in mind before trying any of them:
 | 0 | nothing (Proxmox VE 9, spice-server 0.15.2) | MJPEG | 23 | 15 Mbit/s (37–50 with noise) | 5–9% | — |
 | 1 | + `gstreamer1.0-plugins-ugly` (x264) | H.264, software | 30.7 | 6.6 Mbit/s (59 with noise) | 37% (48% with noise) | 0010 |
 | 2 | + spice-server master, own package | H.264, software | 30.8 | 5.6 Mbit/s | 38% | 0010, 0011 |
-| 3 | + VA-API (Quick Sync), two local patches | H.264, GPU | 29.7 | 3.2 Mbit/s | 7% | 0010, 0011 |
+| 3 | + VA-API (Quick Sync), four local patches | H.264, GPU | 29.7 | 3.2 Mbit/s | 7% | 0010, 0011, 0016 |
 
 The client patches are in `deps/patches/spice-gtk/`, and current SpiceMac builds
 have them. H.264 is still opt-in: turn on **Connection ▸ Prefer H.264 Video**
@@ -107,11 +107,9 @@ qm reboot <vmid>
 When the node has an Intel GPU, spice-server 0.16 looks for an `msdk`, `va` or
 `vaapi` H.264 encoder and uses it in place of x264, converting colours on the GPU
 too. `gstreamer1.0-vaapi` provides `vaapih264enc` with 18 packages, all
-libraries. The alternative, `gstreamer1.0-plugins-bad`, pulls in 116 packages,
-GTK and SDL among them, which a hypervisor does not need. On a GPU like this one,
-whose H.264 encoder is low-power only (`VAEntrypointEncSliceLP`), its `va` plugin
-should also only offer `vah264lpenc`, which the server does not look for (not
-tried). The GPU must not be passed through to a VM.
+libraries; it is also what the newer `va` plugin needs (below), which on its own
+comes only inside `gstreamer1.0-plugins-bad` and its hundred dependencies. The
+GPU must not be passed through to a VM.
 
 With the server's own settings (constant QP 26), streams were 30 fps at 1.7 Mbit/s
 and 11% of a core, but visibly softer than x264, which runs at QP 15 on most
@@ -164,6 +162,108 @@ x264 and ~0.4 ms with Quick Sync.
 One drawback: starting a VA pipeline takes time, so the picture pauses for about
 0.3 s each time the server creates a stream (when a video starts or moves).
 
+### The `va` plugin instead of `vaapi`
+
+On some pages `vaapih264enc` made H.264 unusable: the stream fell to a few fps
+and the node's journal had `GStreamer error from element src: Internal data
+stream error` about once a second. spice-server changes a stream's size
+whenever a frame of another size joins it (e.g. the video plus a line of text
+updated next to it: 1282×88 and 1474×88 in turn), and `vaapih264enc` fails the
+first frame after every size change, whatever its rate control (`failed to
+encode frame`); the server then rebuilds the pipeline. `vah264lpenc`, from
+GStreamer's newer `va` plugin, takes the new size when the caps change on the
+playing pipeline (40 frames changing size every 2: 40 encoded, 0 errors), but
+spice-server takes the pipeline through the NULL state for every change, which
+the `va` plugin fails too (22 encoded, 9 errors). Two more patches:
+
+- **Use `vah264lpenc`.** The server only looks for `vah264enc`, which this GPU
+  (like other recent Intel ones) lacks; it has the low-power encoder only. With
+  it, QVBR at quality 16 as with `vaapi` (`qpi` is the quality there).
+
+  ```diff
+  @@ static gchar *find_best_hw_plugin(const gchar *codec_name)
+  -        if (!gst_features_lookup(feature_name)) {
+  +        if (gst_features_lookup(feature_name)) {
+  +            break;
+  +        }
+  +        g_free(feature_name);
+  +        feature_name = NULL;
+  +        if (codec_name && strcmp(plugins[i], "va") == 0) {
+  +            feature_name = g_strconcat(plugins[i], codec_name, "lpenc", NULL);
+  +            if (gst_features_lookup(feature_name)) {
+  +                break;
+  +            }
+               g_free(feature_name);
+               feature_name = NULL;
+  -            continue;
+           }
+  -        break;
+  @@ static gchar *get_hw_gstenc_opts(const gchar *encoder, const gchar *codec_name)
+  -            gstenc_opts = g_strdup("rate-control=16 b-frames=0 target-usage=7 min-qp=15 max-qp=35");
+  +            gstenc_opts = g_strdup("rate-control=qvbr qpi=16 b-frames=0 target-usage=7 min-qp=15 max-qp=35");
+  ```
+
+- **Change the size while playing.** For the `va` plugin's encoders, a new size
+  (and bitrate, which they take live anyway) is set on the running pipeline
+  instead of through the NULL state.
+
+  ```diff
+  @@ static gboolean create_pipeline(SpiceGstEncoder *encoder)
+       encoder->gstenc = gst_bin_get_by_name(GST_BIN(encoder->pipeline), "encoder");
+  +    GstElementFactory *factory = gst_element_get_factory(encoder->gstenc);
+  +    const gchar *factory_name = factory ? gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)) : "";
+  +    encoder->gstenc_caps_are_dynamic = g_str_has_prefix(factory_name, "va") &&
+  +                                       !g_str_has_prefix(factory_name, "vaapi");
+  @@ static gboolean configure_pipeline(SpiceGstEncoder *encoder)
+  +    if (!(encoder->set_pipeline & SPICE_GST_VIDEO_PIPELINE_STATE) &&
+  +        encoder->gstenc_caps_are_dynamic) {
+  +        if (encoder->set_pipeline & SPICE_GST_VIDEO_PIPELINE_BITRATE) {
+  +            set_gstenc_bitrate(encoder);
+  +        }
+  +        if (encoder->set_pipeline & SPICE_GST_VIDEO_PIPELINE_CAPS) {
+  +            set_appsrc_caps(encoder);
+  +        }
+  +        encoder->set_pipeline = 0;
+  +        return TRUE;
+  +    }
+  ```
+
+  (plus a `gboolean gstenc_caps_are_dynamic;` in `SpiceGstEncoder`).
+
+The `va` plugin is one file, `libgstva.so`, in `gstreamer1.0-plugins-bad`; the
+libraries it uses (`libgstreamer-plugins-bad1.0-0`, libva, gudev) are already on
+the node with `gstreamer1.0-vaapi`. We packaged that file alone, from Debian's
+own package of the same version, instead of installing the hundred others:
+
+```sh
+apt-get download gstreamer1.0-plugins-bad
+dpkg -x gstreamer1.0-plugins-bad_*.deb x
+mkdir -p pkg/DEBIAN pkg/usr/lib/x86_64-linux-gnu/gstreamer-1.0
+cp x/usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstva.so pkg/usr/lib/x86_64-linux-gnu/gstreamer-1.0/
+cat > pkg/DEBIAN/control <<'END'
+Package: gstreamer1.0-va-local
+Version: 1.26.2-3+deb13u3~local1
+Architecture: amd64
+Maintainer: local build <root@localhost>
+Depends: libgstreamer-plugins-bad1.0-0 (>= 1.26.2), libgstreamer-plugins-bad1.0-0 (<< 1.27), libva2, libva-drm2, libgudev-1.0-0, libdrm2
+Conflicts: gstreamer1.0-plugins-bad
+Description: GStreamer va plugin only (libgstva.so from gstreamer1.0-plugins-bad)
+END
+dpkg-deb --root-owner-group --build pkg gstreamer1.0-va-local.deb
+apt-get install ./gstreamer1.0-va-local.deb
+gst-inspect-1.0 vah264lpenc      # VA-API H.264 Low Power Encoder
+```
+
+When Debian updates `gstreamer1.0-plugins-bad`, rebuild it from the new version.
+
+With both patches on the page above: 3 encoder errors in 30 s, all as the stream
+switched to H.264, instead of 30, and 29.4 fps against 22.4 with MJPEG
+(click to screen: median 148 ms against 122). The client needs 0016 too: the
+server's rate control lowered the bit rate report after report against the
+margins SpiceMac reported before it, down to ~0.1 Mbit/s and 3 fps within a
+minute; with it, 30 fps for minutes, also after changing Video Delay from 50 to
+30 ms.
+
 ## Faster file copies
 
 Files dropped on SpiceMac's window travel to the guest's agent in SPICE messages of
@@ -207,6 +307,7 @@ keep the nodes of a cluster on the same package.
 
 ```sh
 apt-get install --allow-downgrades libspice-server1=0.15.2-1+b1     # level 2
+apt-get purge gstreamer1.0-va-local                                  # level 3, va plugin
 apt-get purge gstreamer1.0-vaapi intel-media-va-driver vainfo        # level 3
 apt-get purge gstreamer1.0-plugins-ugly                              # level 1
 qm reboot <vmid>

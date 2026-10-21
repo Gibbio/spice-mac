@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Er Gibbio <gibbio@pm.me>
+Date: Wed, 21 Oct 2026 19:05:47 +0200
+Subject: [PATCH 16/16] display: report stream margins as with the default
+ playout delay, capped
+
+With the video played on the channel's own clock, a frame is shown
+`target` ms after arrival, and the margin reported to the server followed
+that target (the viewer's Video Delay) and each frame's slack, which only
+says how long the client holds the frame. spice-server's GStreamer rate
+control judges each report against the largest margin the stream has had
+and lowers the bit rate, report after report, while margins stay below half
+of it: ~150 ms in an H.264 stream's first second, then 50, took it to
+~0.1 Mbit/s and 3 fps within a minute (339 "score 2, decrement the bit
+rate" in 2 min, no drops reported); changing the delay from 80 to 30 ms
+halved the bit rate, and the stream stayed slow until it was re-created.
+
+Report the margin the default 50 ms target gives, and no more; a frame
+arriving late still lowers it. The statistics keep the real margins.
+---
+ src/channel-display.c | 21 ++++++++++++++++++---
+ 1 file changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/src/channel-display.c b/src/channel-display.c
+index 605f9c7..7aeb4bc 100644
+--- a/src/channel-display.c
++++ b/src/channel-display.c
+@@ -64,6 +64,9 @@
+ 
+ #define MONITORS_MAX 256
+ 
++/* SPICE_STREAM_PLAYOUT_MS's default: see display_playout_shift() */
++#define PLAYOUT_DEFAULT_MS 50
++
+ struct _SpiceDisplayChannelPrivate {
+     GHashTable                  *surfaces;
+     display_surface             *primary;
+@@ -1136,7 +1139,7 @@ static void spice_display_channel_init(SpiceDisplayChannel *channel)
+     /* SPICE_STREAM_PLAYOUT_MS: how long after arrival to show a video frame when
+      * no audio is playing (0 = always follow the server's timestamps) */
+     const gchar *playout = g_getenv("SPICE_STREAM_PLAYOUT_MS");
+-    c->playout_target = playout != NULL ? atoi(playout) : 50;
++    c->playout_target = playout != NULL ? atoi(playout) : PLAYOUT_DEFAULT_MS;
+ }
+ 
+ /* ------------------------------------------------------------------ */
+@@ -2162,7 +2165,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+     display_stream *st = get_stream_by_id(channel, op->id);
+     SpiceSession *session = spice_channel_get_session(channel);
+     guint32 mmtime, playout_time;
+-    int32_t margin, margin_report, shift;
++    int32_t margin, margin_report, server_margin, shift;
+     SpiceFrame *frame;
+ 
+     g_return_if_fail(st != NULL);
+@@ -2192,6 +2195,18 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+      * clock they set up, newer ones the delay the frame really gets, rather than a
+      * client that seems unable to keep up: their rate control cuts the stream
+      * whenever the reported delay is below -15 ms (to ~1 Mbit/s in our test). */
++    /* On its own clock, a frame is shown `target` ms after arrival, whatever
++     * its slack, so tell the server the margin the default target would give,
++     * and no more: a viewer's choice of target (Video Delay) and a frame that
++     * came early are no news for its rate control, which judges each report
++     * against the largest margin the stream has had and lowers the bit rate,
++     * report after report, while margins stay below half of it. Uncapped,
++     * ~150 ms during a stream's first second, then 50, took H.264 streams to
++     * ~0.1 Mbit/s and 3 fps within a minute; after a change from 80 to 30 ms
++     * it halved the bit rate. A frame arriving late still lowers the margin. */
++    server_margin = (c->playout_target > 0 && !c->playout_audio) ?
++        MAX(margin_report, MIN(margin - c->playout_target, 0) + PLAYOUT_DEFAULT_MS) :
++        MAX(margin_report, margin);
+     margin_report = MAX(margin_report, margin);
+     if (margin > 0) {
+         SpiceSession *s = spice_channel_get_session(channel);
+@@ -2216,7 +2231,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+ 
+     if (c->enable_adaptive_streaming) {
+         display_update_stream_report(SPICE_DISPLAY_CHANNEL(channel), op->id,
+-                                     op->multi_media_time, margin_report);
++                                     op->multi_media_time, server_margin);
+         if (st->playback_sync_drops_seq_len >= STREAM_PLAYBACK_SYNC_DROP_SEQ_LEN_LIMIT) {
+             spice_session_sync_playback_latency(spice_channel_get_session(channel));
+             st->playback_sync_drops_seq_len = 0;
+-- 
+2.56.0
+

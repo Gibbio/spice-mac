@@ -216,6 +216,15 @@ static void cs_update_mouse_mode(SpiceChannel *channel, gpointer data)
     }];
 }
 
+- (void)reloadShape {
+    // spice-mac fix (no guest cursor on connect): the shape usually arrives
+    // before the display has a Metal device, and was then dropped ("MTL device
+    // not ready for cursor draw") until the guest changed its cursor. Rebuild
+    // from the channel's current shape once the device is there.
+    self.cursorSize = CGSizeZero;
+    cs_cursor_set(self.channel, NULL, (__bridge void *)self);
+}
+
 #pragma mark - Cursor drawing
 
 - (void)rebuildCursorWithSize:(CGSize)size center:(CGPoint)hotspot {

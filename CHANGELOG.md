@@ -120,6 +120,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   natural-scrolling setting.
 - **Build with Xcode 27 / Swift 6.4**: SwiftPM now emits a macOS-layout resource
   bundle, which `build-app.sh` turned into an unsignable hybrid.
+- **The guest's cursor could be missing after connecting** until the guest changed
+  it (e.g. over text): its shape arrived before the display could draw it and was
+  dropped. With Hide Mac Cursor on, there was no cursor at all.
 - **View ▸ Hide Mac Cursor could leave the Mac's cursor hidden outside the
   window**: turned on from the menu, it hid the cursor at once, with the pointer
   on the menu bar, and nothing showed it again until the pointer crossed the

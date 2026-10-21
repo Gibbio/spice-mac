@@ -289,9 +289,9 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
             [self rebuildCanvasTexture];
         }
         [self rebuildDisplayVertices];
+        // spice-mac: the cursor draws on this device too; see -[CSCursor reloadShape]
+        [self.cursor reloadShape];
     }];
-    // possibly retrigger cursor rebuild
-    self.cursor.display = self;
 }
 
 - (SpiceChannel *)spiceChannel {

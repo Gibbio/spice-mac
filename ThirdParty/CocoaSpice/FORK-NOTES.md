@@ -83,6 +83,14 @@ on a rebase:
   `renderNeedsUpdate`, so a resize redraws a still guest screen at the new size
   (upstream's 843d652 made drawing on-change only, and a resize is not a change).
 
+- **`Sources/CocoaSpice/CSCursor.m` + `CSDisplay.m`** (`-reloadShape`, `-setDevice:`) —
+  **no guest cursor on connect.** The cursor shape usually arrives before the display
+  has a Metal device, and `-rebuildCursorWithSize:center:` dropped it ("MTL device not
+  ready for cursor draw") until the guest changed its cursor; upstream's
+  `self.cursor.display = self` in `-setDevice:` was meant to retrigger it but sets a
+  plain property, before the device is even set. The display now asks its cursor to
+  reload the channel's current shape once the device is set.
+
 ## Diagnostics (spice-mac additions)
 
 With `SPICE_DEBUG` set, the time from a frame reaching CocoaSpice to the screen is

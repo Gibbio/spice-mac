@@ -29,6 +29,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// Used to get the display size in order to compute the right viewpoint origin.
 @property (nonatomic, weak) CSDisplay *display;
 
+/// spice-mac: draw the current cursor shape again, on the display's (new) Metal
+/// device. SPICE thread.
+- (void)reloadShape;
+
 /// Create a new cursor for a SPICE cursor channel
 /// @param channel SPICE cursor channel
 - (instancetype)initWithChannel:(SpiceCursorChannel *)channel NS_DESIGNATED_INITIALIZER;

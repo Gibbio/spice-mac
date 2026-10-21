@@ -11,6 +11,10 @@ public final class SpiceInputRouter {
     /// The active inputs channel. Set when `spiceInputAvailable:` fires.
     public weak var input: CSInput?
 
+    /// The guest display the pointer positions are for (`CSDisplay.monitorID`): one
+    /// inputs channel serves every display's window.
+    public var monitorID = 0
+
     /// Supplies the current guest display size (pixels) for absolute pointer
     /// mapping. If nil, the view's own bounds size is used. Retained as a
     /// fallback for callers that don't supply a `viewportInfoProvider`.
@@ -167,7 +171,7 @@ public final class SpiceInputRouter {
                                   relativePoint: CGPoint(x: event.deltaX, y: event.deltaY))
         } else {
             let p = absolutePoint(event, in: view)
-            input.sendMousePosition(buttonMask, absolutePoint: p)
+            input.sendMousePosition(buttonMask, absolutePoint: p, forMonitorID: monitorID)
             // Client mode: drive the guest cursor overlay ourselves.
             cursorMover?(p)
         }

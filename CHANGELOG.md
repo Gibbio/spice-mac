@@ -49,6 +49,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the display shows the progress, the speed and the time left, with a button to
   stop. About 1 MB/s with a stock spice-server (2 KB messages, 10 in flight); with
   the window raised on the node, ~10 MB/s (docs/server-side-video.md).
+- **Several displays, a window each**, for a Windows VM with `qxl2`–`qxl4`: each
+  window on a screen of its own when there is one, with its own size, zoom and
+  full screen; the pointer goes to the display under it. View ▸ Displays shows a
+  hidden window or turns an off display on. Closing a display window other than
+  the first hides it: turning the display off would leave spice-vdagent-win
+  unable to set any resolution until the guest restarts.
 - **View ▸ Show Statistics** (⌃⌘I): a panel over the display with bandwidth by
   channel, TCP round trip, TLS, the Mac's frame rate and upload-to-screen time,
   each video stream's codec, decoder, frame rates, late and dropped frames and
@@ -83,6 +89,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Resolution requests on a VM with two or more displays.** Every display channel
+  was marked enabled at 0×0 when it opened, so each request listed the other
+  displays at 0×0, and spice-vdagent-win rejects such a config whole, the
+  requested size included (seen with a test client sending that config). Now each
+  request lists every display as the guest has it, and waits until the guest has
+  reported them all (within a second of connecting). The second display's picture
+  also replaced the first one's in the window.
 - **A VM recording from the microphone could get SpiceMac terminated.** The record
   channel opened the Mac's microphone as soon as the guest recorded, and the app
   declared no microphone usage, which macOS punishes by killing the process. The

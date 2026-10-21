@@ -107,6 +107,7 @@ final class SpiceDisplayView: MTKView {
         delegate = renderer
         self.renderer = renderer
         display.addRenderer(renderer)
+        router.monitorID = display.monitorID
         router.displaySizeProvider = { [weak display] in display?.displaySize ?? .zero }
         // In client mouse mode we must position the guest cursor overlay ourselves.
         router.cursorMover = { [weak display] point in display?.cursor?.move(to: point) }

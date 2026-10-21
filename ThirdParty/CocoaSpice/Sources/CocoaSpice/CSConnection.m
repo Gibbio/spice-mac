@@ -33,7 +33,7 @@
 #import <spice/vd_agent.h>
 #import <netinet/tcp.h>
 
-@interface CSConnection ()
+@interface CSConnection () <CSMonitorConfigSender>
 
 @property (nonatomic, readwrite) BOOL isTLSOnly;
 @property (nonatomic, readwrite) CSSession *session;
@@ -46,6 +46,8 @@
 @property (atomic, copy, nullable) NSArray<NSNumber *> *videoCodecsSetting;
 @property (atomic) NSInteger playoutDelaySetting;
 @property (atomic) BOOL microphoneSetting;
+// spice-mac (multi-monitor): a config to send once every display's state is known
+@property (nonatomic) BOOL monitorConfigPending;
 
 @end
 
@@ -176,6 +178,113 @@ static void cs_main_channel_event(SpiceChannel *channel, SpiceChannelEvent event
     }
 }
 
+#pragma mark - Monitors config (spice-mac, multi-monitor)
+
+// Every monitors config this client sends lists all the guest's displays.
+// spice-vdagent-win (0.10) turns off a display that a config leaves out or sends
+// as 0x0 with no depth, fails the whole config for one sent as 0x0 with a depth,
+// and once it has turned a QXL display off it cannot turn it back on until the
+// guest restarts: every later config fails, for the other displays too. So a
+// display the application has not resized goes out as the guest has it, and
+// nothing goes out until the guest's state of every display is known: it reported
+// the display's monitor, or there was still none a second after the channel
+// opened: then the display is off, unless it has a surface, whose size it is
+// sent at (sending it as off would turn it off). spice-gtk's own table is only
+// written then, since
+// spice-gtk also sends it by itself whenever the agent (re)connects. SPICE thread.
+static void cs_sync_monitors(CSConnection *self, BOOL send)
+{
+    SpiceMainChannel *main = self.spiceMain;
+    NSMutableArray<CSDisplay *> *displays = [NSMutableArray array];
+    gboolean agent = FALSE;
+
+    if (main == NULL) {
+        return;
+    }
+    for (CSChannel *channel in self.channels) {
+        if (![channel isKindOfClass:CSDisplay.class]) {
+            continue;
+        }
+        CSDisplay *display = (CSDisplay *)channel;
+        if (!display.guestStateKnown && CGRectIsNull(display.requestedBounds)) {
+            SPICE_DEBUG("[CocoaSpice] monitors config held: display %ld not known yet", display.channelID);
+            self.monitorConfigPending = self.monitorConfigPending || send;
+            return;
+        }
+        [displays addObject:display];
+    }
+    for (CSDisplay *display in displays) {
+        int id = (int)display.monitorID;
+        CGRect bounds = CGRectIsNull(display.requestedBounds) ? display.guestBounds : display.requestedBounds;
+
+        if (id < 0 || id >= 16) { // spice-gtk's MAX_DISPLAY
+            continue;
+        }
+        if (!display.isEnabled || CGRectIsNull(bounds) || CGRectIsEmpty(bounds)) {
+            spice_main_channel_update_display_enabled(main, id, FALSE, FALSE);
+        } else {
+            spice_main_channel_update_display_enabled(main, id, TRUE, FALSE);
+            spice_main_channel_update_display(main, id, MAX(0, bounds.origin.x), MAX(0, bounds.origin.y),
+                                              bounds.size.width, bounds.size.height, FALSE);
+        }
+    }
+    if (send || self.monitorConfigPending) {
+        self.monitorConfigPending = NO;
+        g_object_get(main, "agent-connected", &agent, NULL);
+        if (agent) {
+            spice_main_channel_send_monitor_config(main);
+        }
+    }
+}
+
+- (void)sendMonitorConfig {
+    cs_sync_monitors(self, YES);
+}
+
+static gboolean cs_display_state_timeout(gpointer data)
+{
+    dispatch_block_t timeout = (__bridge dispatch_block_t)data;
+
+    timeout();
+    return G_SOURCE_REMOVE;
+}
+
+static void cs_display_state_timeout_release(gpointer data)
+{
+    CFRelease(data);
+}
+
+// A display channel just opened: the server sends its surface and monitor right
+// away when the guest has the display on; without them a second later, it is off.
+// With a surface but still no monitor, it counts as on at the surface's size.
+static void cs_watch_display_state(CSConnection *self, CSDisplay *display)
+{
+    __weak CSConnection *weakSelf = self;
+    __weak CSDisplay *weakDisplay = display;
+    dispatch_block_t timeout = ^{
+        CSConnection *connection = weakSelf;
+        CSDisplay *timedOut = weakDisplay;
+        SpiceDisplayPrimary primary;
+        if (connection == nil || timedOut == nil || timedOut.guestStateKnown) {
+            return;
+        }
+        if (spice_display_channel_get_primary(timedOut.spiceChannel, 0, &primary)) {
+            SPICE_DEBUG("[CocoaSpice] display %ld has no monitor yet, but a %dx%d surface",
+                        timedOut.channelID, primary.width, primary.height);
+            timedOut.guestBounds = CGRectMake(0, 0, primary.width, primary.height);
+        } else {
+            SPICE_DEBUG("[CocoaSpice] display %ld has no monitor: off", timedOut.channelID);
+        }
+        timedOut.guestStateKnown = YES;
+        cs_sync_monitors(connection, NO);
+    };
+    GSource *source = g_timeout_source_new(1000);
+    g_source_set_callback(source, cs_display_state_timeout, (void *)CFBridgingRetain(timeout),
+                          cs_display_state_timeout_release);
+    g_source_attach(source, CSMain.sharedInstance.glibMainContext);
+    g_source_unref(source);
+}
+
 static void cs_display_monitors(SpiceChannel *channel, GParamSpec *pspec,
                              gpointer data)
 {
@@ -206,7 +315,15 @@ static void cs_display_monitors(SpiceChannel *channel, GParamSpec *pspec,
     // channel, so any non-empty config means the display exists — create/update it
     // and let cs_update_monitor_area (CSDisplay.m) pick out our head's geometry by
     // id. Treat an empty config as the display being gone.
+    //
+    // spice-mac (multi-monitor): the guest's bounds for the display come from the
+    // first head. A display goes away only once it was there: the config is also
+    // empty for a moment while a channel starts. When it comes back it is created
+    // again.
     if (cfgs->len > 0) {
+        SpiceDisplayMonitorConfig *head = &g_array_index(cfgs, SpiceDisplayMonitorConfig, 0);
+        display.guestBounds = CGRectMake(head->x, head->y, head->width, head->height);
+        display.guestStateKnown = YES;
         if (display.hasInitialConfig) {
             [self.delegate spiceDisplayUpdated:self display:display];
         } else {
@@ -214,8 +331,14 @@ static void cs_display_monitors(SpiceChannel *channel, GParamSpec *pspec,
             display.hasInitialConfig = YES;
         }
     } else {
-        [self.delegate spiceDisplayDestroyed:self display:display];
+        display.guestBounds = CGRectNull;
+        if (display.hasInitialConfig) {
+            display.requestedBounds = CGRectNull;
+            display.hasInitialConfig = NO;
+            [self.delegate spiceDisplayDestroyed:self display:display];
+        }
     }
+    cs_sync_monitors(self, NO);
     
     g_clear_pointer(&cfgs, g_array_unref);
 }
@@ -310,6 +433,12 @@ static void cs_display_channel_event(SpiceChannel *channel, SpiceChannelEvent ev
 
     if (event == SPICE_CHANNEL_OPENED) {
         cs_apply_video_settings(self, channel, YES, YES);
+        for (CSChannel *candidate in self.channels) {
+            if (candidate.spiceChannel == channel && [candidate isKindOfClass:CSDisplay.class]) {
+                cs_watch_display_state(self, (CSDisplay *)candidate);
+                break;
+            }
+        }
     }
 }
 
@@ -336,12 +465,16 @@ static void cs_channel_new(SpiceSession *s, SpiceChannel *channel, gpointer data
         SPICE_DEBUG("new display channel (#%d)", chid);
         CSDisplay *display = [[CSDisplay alloc] initWithChannel:SPICE_DISPLAY_CHANNEL(channel)];
         display.spiceMain = self.spiceMain;
+        display.monitorConfigSender = self;
         [self.mutableChannels addObject:display];
         g_signal_connect_after(channel, "notify::monitors",
                                G_CALLBACK(cs_display_monitors), (__bridge void *)self);
         g_signal_connect(channel, "channel-event",
                          G_CALLBACK(cs_display_channel_event), (__bridge void *)self);
-        display.isEnabled = YES;
+        // spice-mac (multi-monitor): no `display.isEnabled = YES` here: it marked
+        // each display enabled at 0x0 in spice-gtk's table, and a config with a
+        // second display at 0x0 is one spice-vdagent-win rejects whole, the first
+        // display's new size included. See cs_sync_monitors().
         // find and connect to any existing cursor channel
         for (CSChannel *candidate in self.channels) {
             if ([candidate isKindOfClass:CSCursor.class] && candidate.channelID == chid) {
@@ -527,6 +660,22 @@ end:
 
 - (NSArray<CSChannel *> *)channels {
     return self.mutableChannels;
+}
+
+- (NSArray<CSDisplay *> *)displays {
+    __block NSMutableArray<CSDisplay *> *displays = [NSMutableArray array];
+    [CSMain.sharedInstance syncWith:^{
+        for (CSChannel *channel in self.mutableChannels) {
+            if ([channel isKindOfClass:CSDisplay.class]) {
+                [displays addObject:(CSDisplay *)channel];
+            }
+        }
+    }];
+    [displays sortUsingComparator:^NSComparisonResult(CSDisplay *a, CSDisplay *b) {
+        return a.monitorID < b.monitorID ? NSOrderedAscending
+            : a.monitorID > b.monitorID ? NSOrderedDescending : NSOrderedSame;
+    }];
+    return displays;
 }
 
 - (void)setSpiceMain:(SpiceMainChannel *)spiceMain {

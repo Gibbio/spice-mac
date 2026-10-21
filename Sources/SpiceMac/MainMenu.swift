@@ -100,6 +100,7 @@ enum MainMenu {
             .keyEquivalentModifierMask = [.control, .command]
         viewMenu.addItem(.separator())
         viewMenu.addItem(zoomMenuItem())
+        viewMenu.addItem(displaysMenuItem())
         viewMenu.addItem(.separator())
         let hideCursor = NSMenuItem(title: "Hide Mac Cursor",
                                     action: #selector(AppDelegate.toggleHideMacCursor(_:)), keyEquivalent: "")
@@ -140,6 +141,19 @@ enum MainMenu {
 
     /// The USB submenu, populated dynamically by the front `SpiceWindowController`.
     static weak var usbSubmenu: NSMenu?
+
+    /// View ▸ Displays — one item per guest display, filled in by the front
+    /// window's session as the menu opens.
+    private static func displaysMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Displays", action: nil, keyEquivalent: "")
+        let menu = NSMenu(title: "Displays")
+        menu.delegate = displaysMenuFiller
+        DisplaysMenuFiller.addPlaceholder(to: menu)
+        item.submenu = menu
+        return item
+    }
+
+    private static let displaysMenuFiller = DisplaysMenuFiller()
 
     /// View ▸ Zoom — how many host physical pixels each guest pixel occupies.
     ///
@@ -192,5 +206,22 @@ enum MainMenu {
             menu.addItem(levelItem)
         }
         return item
+    }
+}
+
+/// Fills View ▸ Displays from the front `SpiceWindowController` as it opens.
+final class DisplaysMenuFiller: NSObject, NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let controller = (NSApp.keyWindow ?? NSApp.mainWindow)?.windowController as? SpiceWindowController
+        if controller?.addDisplayItems(to: menu) != true {
+            Self.addPlaceholder(to: menu)
+        }
+    }
+
+    static func addPlaceholder(to menu: NSMenu) {
+        let item = NSMenuItem(title: "Not connected", action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        menu.addItem(item)
     }
 }

@@ -15,6 +15,7 @@
 //
 
 #import "CSDisplay.h"
+#import "CSMonitorConfigSender.h"
 #import "CSRenderer.h"
 
 typedef struct _SpiceDisplayChannel SpiceDisplayChannel;
@@ -22,6 +23,21 @@ typedef struct _SpiceDisplayChannel SpiceDisplayChannel;
 NS_ASSUME_NONNULL_BEGIN
 
 @interface CSDisplay ()
+
+@property (nonatomic, nullable, weak) id<CSMonitorConfigSender> monitorConfigSender;
+
+/// spice-mac (multi-monitor), SPICE thread: the bounds `-requestResolution:` asked
+/// for, CGRectNull until then and once the guest turns the display off.
+@property (nonatomic) CGRect requestedBounds;
+
+/// spice-mac (multi-monitor), SPICE thread: the guest's bounds for this display,
+/// CGRectNull while it has none (off, or not known yet).
+@property (nonatomic) CGRect guestBounds;
+
+/// spice-mac (multi-monitor), SPICE thread: whether `guestBounds` is known: the
+/// guest reported the display's monitor, or had none a second after the channel
+/// opened.
+@property (nonatomic) BOOL guestStateKnown;
 
 /// True if currently rendering from GL backend
 @property (nonatomic, readonly) BOOL isGLEnabled;

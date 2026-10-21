@@ -20,6 +20,7 @@
 #import "CSCursor+Protected.h"
 #import "CSChannel+Protected.h"
 #import "CSDisplay+Renderer_Protected.h"
+#import "CSMonitorConfigSender.h"
 #import "CSShaderTypes.h"
 #import <glib.h>
 #import <poll.h>
@@ -37,6 +38,11 @@
 @property (nonatomic, readonly) BOOL hasDrawOutstanding;
 @property (nonatomic, nullable, weak, readwrite) CSCursor *cursor;
 @property (nonatomic) BOOL hasInitialConfig;
+// spice-mac (multi-monitor): see CSDisplay+Protected.h
+@property (nonatomic, nullable, weak) id<CSMonitorConfigSender> monitorConfigSender;
+@property (nonatomic) CGRect requestedBounds;
+@property (nonatomic) CGRect guestBounds;
+@property (nonatomic) BOOL guestStateKnown;
 @property (nonatomic, nullable) IOSurfaceRef delayedScanoutSurface;
 @property (nonatomic, assign) SpiceGlScanout delayedScanoutInfo;
 
@@ -409,6 +415,11 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
         self.channel = g_object_ref(channel);
         self.monitorID = self.channelID;
         self.renderers = [NSMutableArray array];
+        // spice-mac (multi-monitor): enabled, without telling spice-gtk anything
+        // yet; CSConnection.m (monitors config) writes its table.
+        _isEnabled = YES;
+        self.requestedBounds = CGRectNull;
+        self.guestBounds = CGRectNull;
         SPICE_DEBUG("[CocoaSpice] %s:%d", __FUNCTION__, __LINE__);
         g_signal_connect(channel, "display-primary-create",
                          G_CALLBACK(cs_primary_create), (__bridge void *)self);
@@ -834,17 +845,11 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
         SPICE_DEBUG("[CocoaSpice] ignoring change resolution because main channel not found");
         return;
     }
+    // spice-mac (multi-monitor): the connection sends this along with every other
+    // display, see CSConnection.m.
     [CSMain.sharedInstance asyncWith:^{
-        SpiceMainChannel *main = self.spiceMain;
-        spice_main_channel_update_display_enabled(main, (int)self.monitorID, TRUE, FALSE);
-        spice_main_channel_update_display(main,
-                                          (int)self.monitorID,
-                                          bounds.origin.x,
-                                          bounds.origin.y,
-                                          bounds.size.width,
-                                          bounds.size.height,
-                                          TRUE);
-        spice_main_channel_send_monitor_config(main);
+        self.requestedBounds = bounds;
+        [self.monitorConfigSender sendMonitorConfig];
     }];
 }
 
@@ -855,8 +860,8 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
             return;
         }
         [CSMain.sharedInstance asyncWith:^{
-            spice_main_channel_update_display_enabled(self.spiceMain, (int)self.monitorID, isEnabled, TRUE);
             self->_isEnabled = isEnabled;
+            [self.monitorConfigSender sendMonitorConfig];
         }];
     }
 }

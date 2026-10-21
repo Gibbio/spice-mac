@@ -51,6 +51,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) NSInteger monitorID;
 
 /// If false, this display will not be used
+///
+/// spice-mac: default true. Setting it to false turns the guest's display off, and
+/// spice-vdagent-win (0.10) cannot turn a QXL display back on after that until the
+/// guest restarts, failing every later resolution request meanwhile, for the other
+/// displays too.
 @property (nonatomic) BOOL isEnabled;
 
 - (instancetype)init NS_UNAVAILABLE;
@@ -58,6 +63,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// Request a new screen resolution from SPICE guest agent
 ///
 /// Does nothing is the guest agent is not installed. If successful, `displaySize` will be updated.
+///
+/// spice-mac: every display of the connection is sent along, each the way the guest
+/// has it unless it was requested too, once the guest's state of all of them is
+/// known (within a second of their channels opening). A display the guest has off
+/// is turned on.
 /// @param bounds The requested display bounds
 - (void)requestResolution:(CGRect)bounds;
 

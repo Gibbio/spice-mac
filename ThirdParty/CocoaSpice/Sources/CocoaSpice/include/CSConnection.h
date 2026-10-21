@@ -34,6 +34,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// Contains all connected channels that CocoaSpice can handle
 @property (nonatomic, readonly) NSArray<CSChannel *> *channels;
 
+/// spice-mac: the display channels by `monitorID`, including those the guest has
+/// off. A snapshot taken on the SPICE thread, so any thread can read it (`channels`
+/// is the SPICE thread's live array).
+@property (nonatomic, readonly) NSArray<CSDisplay *> *displays;
+
 /// USB forwarding options
 @property (nonatomic, readonly) CSUSBManager *usbManager;
 

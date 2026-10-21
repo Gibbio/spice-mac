@@ -127,6 +127,30 @@ the server's first MARK) and 0012 (the playout setter and the statistics getters
   `finished` signal): the call's error is only a count of failed files.
   SpiceMac's drag and drop uses it.
 
+## Multiple displays (spice-mac additions)
+
+- **`Sources/CocoaSpice/CSConnection.m`** (`cs_sync_monitors`) — the monitors
+  config is sent for all displays at once: a display the application has not
+  resized goes out as the guest reports it (`guestBounds`, from its first head),
+  and nothing is sent, nor written to spice-gtk's table (spice-gtk sends that by
+  itself when the agent connects), until every display channel either reported a
+  monitor or had none a second after opening (`cs_watch_display_state`: off, or
+  on at its surface's size if it has one).
+  spice-vdagent-win 0.10 turns off a display left out of a config, rejects a
+  config with one at 0×0, and cannot turn a QXL display back on until the guest
+  restarts. The channel-open `display.isEnabled = YES` is gone: it put every
+  display in spice-gtk's table at 0×0.
+- **`Sources/CocoaSpice/CSDisplay.m`** — `-requestResolution:` and `isEnabled`
+  record the display's wish (`requestedBounds`, `_isEnabled`, default YES) and go
+  through the connection (**`CSMonitorConfigSender.h`**, new, private) instead of
+  sending a config of their own.
+- **`cs_display_monitors`** — a display is destroyed only if it was created
+  (`hasInitialConfig`, reset then, so it is created again when the guest turns it
+  back on); the config is also empty for a moment while a channel starts.
+- **`include/CSConnection.h`** — `displays`: the display channels by `monitorID`,
+  off ones included, as a snapshot taken on the SPICE thread (`channels` is that
+  thread's live array).
+
 ## Build integration (spice-mac additions)
 
 - **`Package.swift`** — compiles against the headers `scripts/build-deps.sh` installs

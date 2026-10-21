@@ -5,9 +5,11 @@ import CocoaSpice
 import SpiceController
 import DisplayScale
 
-/// Owns one SPICE session window: hosts the `SpiceDisplayView`, reflects
-/// connection state, resizes to the guest, and exposes the Connection/USB menu
-/// actions via the responder chain.
+/// Owns one window of a SPICE session, for one guest display: hosts the
+/// `SpiceDisplayView`, resizes to the guest, and exposes the Connection/USB menu
+/// actions via the responder chain. Display 0's window is the session's: it also
+/// reflects the connection state and opens a window for each other display the
+/// guest has on.
 final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
 
     private let client: SpiceClient
@@ -34,6 +36,18 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
     /// Called when the window closes so the app can drop its reference.
     var onClose: (() -> Void)?
 
+    /// The guest display this window shows (`CSDisplay.monitorID`). Display 0's
+    /// window connects, shows the connection's state, owns the windows of the
+    /// other displays (`displayWindows`) and closes them, and the connection, when
+    /// it closes. Closing another display's window only hides it (see
+    /// `windowShouldClose`).
+    let monitorID: Int
+    private weak var sessionWindow: SpiceWindowController?
+    private var displayWindows: [Int: SpiceWindowController] = [:]
+    private var isSessionWindow: Bool { monitorID == 0 }
+    /// Closed while in full screen: hidden once out of it.
+    private var hidesAfterFullScreen = false
+
     /// The last guest size we asked for. Suppresses a redundant monitor-config,
     /// which costs a real mode switch; cleared when the display/agent state
     /// restarts.
@@ -58,9 +72,15 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
     /// last level picked anywhere) and changed only by the menu commands below.
     private var displayZoom: DisplayZoom = Preferences.displayZoom
 
-    init(client: SpiceClient, sourceURL: URL) {
+    convenience init(client: SpiceClient, sourceURL: URL) {
+        self.init(client: client, sourceURL: sourceURL, monitorID: 0, session: nil)
+    }
+
+    private init(client: SpiceClient, sourceURL: URL, monitorID: Int, session: SpiceWindowController?) {
         self.client = client
         self.sourceURL = sourceURL
+        self.monitorID = monitorID
+        self.sessionWindow = session
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1024, height: 768),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -72,9 +92,13 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
         window.center()
         lastKnownBackingScale = window.backingScaleFactor
         setupViews()
-        wireClient()
+        if isSessionWindow {
+            wireClient()
+            applyVideoPreferences()
+        } else {
+            wireAgent()
+        }
         wireNotifications()
-        applyVideoPreferences()
     }
 
     deinit {
@@ -85,7 +109,8 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     private var baseTitle: String {
-        client.title ?? sourceURL.deletingPathExtension().lastPathComponent
+        let title = client.title ?? sourceURL.deletingPathExtension().lastPathComponent
+        return isSessionWindow ? title : "\(title) — Display \(monitorID + 1)"
     }
 
     // MARK: - Views
@@ -140,26 +165,37 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
     // MARK: - Client wiring
 
     private func wireClient() {
-        client.onDisplayCreated = { [weak self] display in self?.attachDisplay(display) }
+        client.onDisplayCreated = { [weak self] display in self?.displayCreated(display) }
         // NB: do NOT resize the window when the guest resolution changes. The view
         // re-fits the viewport via its displaySize KVO, so the window stays the
         // user's size. Resizing here would chase the guest size and, combined with
         // requestResolution, oscillate (the guest reconfigures → window resizes →
         // we request a new resolution → …).
-        client.onDisplayDestroyed = { [weak self] _ in self?.displayView.detach() }
+        client.onDisplayDestroyed = { [weak self] display in self?.displayDestroyed(display) }
+        // One inputs channel for every display's window.
         client.onInputAvailable = { [weak self] input in
             guard let self else { return }
             self.displayView.router.input = input
             self.displayView.router.requestMouseMode(server: false)
             self.window?.makeFirstResponder(self.displayView)
+            for controller in self.displayWindows.values { controller.displayView.router.input = input }
         }
-        client.onInputUnavailable = { [weak self] _ in self?.displayView.router.input = nil }
+        client.onInputUnavailable = { [weak self] _ in
+            guard let self else { return }
+            self.displayView.router.input = nil
+            for controller in self.displayWindows.values { controller.displayView.router.input = nil }
+        }
 
         client.$status
             .receive(on: RunLoop.main)
             .sink { [weak self] in self?.update(for: $0) }
             .store(in: &cancellables)
 
+        wireAgent()
+    }
+
+    /// Every display's window asks for its own resolution when the agent comes.
+    private func wireAgent() {
         client.$agentConnected
             .receive(on: RunLoop.main)
             .sink { [weak self] connected in
@@ -182,6 +218,8 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
             object: nil, queue: .main) { [weak self] _ in
             self?.screenChanged(after: 0.6)
         })
+        // The rest is the connection's, so the session window's.
+        guard isSessionWindow else { return }
         notificationObservers.append(center.addObserver(
             forName: .videoSettingsChanged, object: nil, queue: .main) { [weak self] _ in
             self?.applyVideoPreferences()
@@ -258,7 +296,8 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
     private func attachDisplay(_ display: CSDisplay) {
         displayView.attachDisplay(display)
         lastRequestedGuestSize = nil   // a re-attach means a fresh guest surface
-        resizeToDisplay(display.displaySize, recenter: true)
+        // Another display's window stays where makeDisplayWindow put it.
+        resizeToDisplay(display.displaySize, recenter: isSessionWindow)
         // The agent-connected and display-created edges race, and whichever loses
         // has to be the one that asks. Safe against the oscillation rule:
         // spiceDisplayCreated is a one-shot per display channel (later configs fire
@@ -268,6 +307,110 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
         window?.makeFirstResponder(displayView)
         if client.prefersFullscreen, window?.styleMask.contains(.fullScreen) == false {
             window?.toggleFullScreen(nil)
+        }
+    }
+
+    // MARK: - The guest's other displays
+
+    private func displayCreated(_ display: CSDisplay) {
+        guard display.monitorID != monitorID else {
+            attachDisplay(display)
+            return
+        }
+        let controller = displayWindows[display.monitorID] ?? makeDisplayWindow(display.monitorID)
+        // Shown before attaching, which may take it to full screen.
+        controller.window?.orderFront(nil)
+        controller.attachDisplay(display)
+    }
+
+    /// The guest turned a display off (or it never came up).
+    private func displayDestroyed(_ display: CSDisplay) {
+        if display.monitorID == monitorID {
+            displayView.detach()
+        } else {
+            displayWindows.removeValue(forKey: display.monitorID)?.close()
+        }
+    }
+
+    /// On a screen of its own while there are screens without a SpiceMac window;
+    /// otherwise cascaded from this one.
+    private func makeDisplayWindow(_ id: Int) -> SpiceWindowController {
+        let controller = SpiceWindowController(client: client, sourceURL: sourceURL, monitorID: id, session: self)
+        controller.displayView.router.input = client.primaryInput
+        if let window = controller.window, let sessionWindow = self.window {
+            let others = displayWindows.keys.sorted().compactMap { displayWindows[$0]?.window }
+            let taken = Set(([sessionWindow] + others).compactMap(\.screen))
+            if let screen = NSScreen.screens.first(where: { !taken.contains($0) }) {
+                let area = screen.visibleFrame
+                window.setFrameOrigin(NSPoint(x: area.midX - window.frame.width / 2,
+                                              y: area.midY - window.frame.height / 2))
+            } else {
+                let from = others.last ?? sessionWindow
+                window.setFrameTopLeftPoint(window.cascadeTopLeft(from: NSPoint(x: from.frame.minX, y: from.frame.maxY)))
+            }
+        }
+        displayWindows[id] = controller
+        return controller
+    }
+
+    private func closeDisplayWindows() {
+        let controllers = displayWindows.values
+        displayWindows.removeAll()
+        for controller in controllers { controller.close() }
+    }
+
+    /// Another display's close button hides its window: the guest keeps the
+    /// display, and View ▸ Displays shows it again. Turning the display off, as
+    /// virt-viewer does, breaks Windows guests: spice-vdagent-win 0.10 cannot turn
+    /// a QXL display back on until the guest restarts, and fails every resolution
+    /// change until then, the other displays' too.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard !isSessionWindow else { return true }
+        if sender.styleMask.contains(.fullScreen) {
+            hidesAfterFullScreen = true
+            sender.toggleFullScreen(nil)
+        } else {
+            sender.orderOut(nil)
+        }
+        return false
+    }
+
+    // MARK: - View ▸ Displays
+
+    /// Fills View ▸ Displays with the session's displays; false when not connected.
+    func addDisplayItems(to menu: NSMenu) -> Bool {
+        if let sessionWindow { return sessionWindow.addDisplayItems(to: menu) }
+        let displays = client.displays
+        guard client.status == .connected, !displays.isEmpty else { return false }
+        for display in displays {
+            let id = display.monitorID
+            let item = NSMenuItem(title: "Display \(id + 1)",
+                                  action: #selector(showGuestDisplay(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = id
+            if let window = id == monitorID ? window : displayWindows[id]?.window {
+                item.state = window.isVisible ? .on : .off
+            } else {
+                item.title += " (Off)"
+                item.toolTip = "Turn this display on in the VM (needs its SPICE agent)."
+            }
+            menu.addItem(item)
+        }
+        return true
+    }
+
+    /// Shows a display's window, or asks the guest to turn the display on, at this
+    /// window's size; its window opens once the guest has it on.
+    @objc private func showGuestDisplay(_ sender: NSMenuItem) {
+        let id = sender.tag
+        if id == monitorID {
+            window?.makeKeyAndOrderFront(nil)
+        } else if let controller = displayWindows[id] {
+            controller.window?.makeKeyAndOrderFront(nil)
+        } else if client.supportsDynamicResolution,
+                  let display = client.displays.first(where: { $0.monitorID == id }) {
+            let size = displayView.attachedDisplay?.displaySize ?? CGSize(width: 1280, height: 720)
+            display.requestResolution(CGRect(origin: .zero, size: size))
         }
     }
 
@@ -292,9 +435,11 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
             // background so the centered message is readable.
             displayView.isHidden = true
             showStatus("Disconnected.\nOpen a fresh .vv file to reconnect.")
+            closeDisplayWindows()
         case .failed(let message):
             displayView.isHidden = true
             showStatus("Connection failed.\n\(message)")
+            closeDisplayWindows()
         }
         window?.title = title(for: status)
         isConnected = status == .connected
@@ -452,6 +597,10 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
+        if hidesAfterFullScreen {
+            hidesAfterFullScreen = false
+            window?.orderOut(nil)
+        }
         scheduleResolutionRequest()
     }
 
@@ -483,7 +632,10 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
         for observer in notificationObservers { NotificationCenter.default.removeObserver(observer) }
         notificationObservers.removeAll()
         displayView.router.releaseAll()
-        client.disconnect()
+        if isSessionWindow {
+            closeDisplayWindows()
+            client.disconnect()
+        }
         displayView.detach()
         onClose?()
     }
@@ -609,6 +761,9 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
         switch menuItem.action {
         case #selector(sendCtrlAltDel(_:)), #selector(releaseCursor(_:)):
             return displayView.router.input != nil
+        case #selector(showGuestDisplay(_:)):
+            return menuItem.tag == monitorID || displayWindows[menuItem.tag] != nil
+                || client.supportsDynamicResolution
         case #selector(setDisplayZoom(_:)):
             // Radio-style: exactly one level checked, recomputed on every menu open
             // so it tracks this window, including after ⌃⌘+ / ⌃⌘-.

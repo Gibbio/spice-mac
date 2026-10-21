@@ -26,6 +26,7 @@ UTM uses). Apple-Silicon only.
 > | Audio (guest needs a SPICE audio device) | ✅ native CoreAudio, 60–130 ms |
 > | Microphone (off unless shared) | ✅ |
 > | Copy files into the VM (drag and drop) | ✅ |
+> | Several displays, a window each (Windows guest, `qxl2`–`qxl4`) | ✅ |
 > | USB redirection | plumbed |
 
 ## Download
@@ -284,6 +285,33 @@ so it runs at about 1 MB/s (20 MB in 19 s in our test, the file arriving intact)
 whatever the network. Raising that window on the node made it ~10× faster (200 MB
 in 19 s): see [docs/server-side-video.md](docs/server-side-video.md) ▸ *Faster file
 copies*.
+
+## Multiple displays
+
+Give the VM more than one display in Proxmox (Hardware ▸ Display ▸ *SPICE dual
+monitor*, i.e. `vga: qxl2`; `qxl3` and `qxl4` for three and four) and SpiceMac opens
+a window for each display the guest has on, on a screen of its own while there are
+screens without a SpiceMac window, cascaded otherwise. Each window has its own
+size, zoom and full screen, and the guest follows each window's size; in the guest
+the displays sit side by side, left to right in order. The pointer goes to the
+display under it; the keyboard to whichever window is in front. A `.vv` that asks
+for full screen puts every window in full screen. View ▸ Displays lists the
+displays: one that is off can be turned on there (it needs the guest agent), at
+the main window's size.
+
+Closing a display window other than the first only hides it; View ▸ Displays
+shows it again, and closing the first window ends the session. SpiceMac never
+turns a display off: when spice-vdagent-win (0.10, the current one) turns off a
+display of a VM with several QXL devices, it cannot turn it back on until the
+guest restarts, and until then every resolution change fails, the other displays'
+included. Turning a display off from inside Windows (Win+P) is fine but SpiceMac
+does not see it, so its window keeps the last picture and the next resize turns
+the display on again.
+
+This is for Windows guests, where Proxmox gives each display its own QXL device.
+A Linux guest gets one QXL device with several heads, which SpiceMac does not
+split into windows: it shows the first, and its first resolution request turns
+the other heads off, as before.
 
 ## Verifying the tested components
 

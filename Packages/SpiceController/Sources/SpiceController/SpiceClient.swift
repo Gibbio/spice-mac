@@ -56,6 +56,10 @@ public final class SpiceClient: NSObject, ObservableObject {
     /// USB redirection manager for the active connection, if any.
     public var usbManager: CSUSBManager? { connection?.usbManager }
 
+    /// Every display channel of the connection, by `monitorID`, including those
+    /// the guest has off (`onDisplayCreated` reports a display once it is on).
+    public var displays: [CSDisplay] { connection?.displays ?? [] }
+
     /// The video codecs to ask the server for, first one preferred; nil leaves the
     /// server's own order. Set before `connect()` or while connected: a change
     /// applies at once, and makes the server restart its running streams.

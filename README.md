@@ -150,8 +150,8 @@ sources into `Sysroot/` (arm64, macOS 12+, every library `@rpath`-relative):
   any library that references a path outside `@rpath` or the OS.
 - **Patched where needed.** `deps/patches/<package>/` holds the patches applied on
   top of upstream. For spice-gtk: UTM's GMainContext support (CocoaSpice relies on
-  it), a macOS build fix and the VideoToolbox H.264 decoder — see
-  [deps/README.md](deps/README.md).
+  it), a macOS build fix, the VideoToolbox H.264 decoder and our video timing
+  fixes — see [deps/README.md](deps/README.md).
 - **No GPL.** LGPL / Apache-2.0 / BSD / MIT / ISC only — see
   [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt).
 
@@ -199,11 +199,14 @@ only when it can see the video as one region:
 
 Streams arrive as MJPEG by default. SpiceMac can also decode **H.264** in hardware
 (VideoToolbox) — in our 720p30 test (debug logging on) ~11% of a core against ~26%
-for MJPEG. The server needs
-`gstreamer1.0-plugins-ugly` (x264) for it, and the client asks for it only when
-started with `SPICE_PREFERRED_VIDEO_CODECS=h264,mjpeg` — opt-in, because the
-spice-server shipped with Proxmox VE 9 (0.15.2) crashed in our tests when an
-H.264 stream was torn down, taking the VM down with it.
+for MJPEG. It asks for it only when started with
+`SPICE_PREFERRED_VIDEO_CODECS=h264,mjpeg` — opt-in, because the work moves to the
+node: Proxmox's spice-server encodes H.264 in software (x264, from
+`gstreamer1.0-plugins-ugly`, not installed by default), about a third of a core
+per stream in our tests against 5–9% for MJPEG.
+[docs/server-side-video.md](docs/server-side-video.md) describes what the node
+needs, up to spice-server 0.16 with Intel Quick Sync: 30 fps at ~3 Mbit/s for ~7%
+of a core.
 
 **Latency.** The server keeps the client's clock 400 ms behind its own, as room to
 line video up with buffered audio. Unless the guest is playing sound, SpiceMac

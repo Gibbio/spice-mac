@@ -19,10 +19,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spice-gtk 0.42.
 - **Hardware H.264 decoding (VideoToolbox)** for SPICE video streams (in our 720p30
   test, debug logging on: ~11% of a core against ~26% for MJPEG). Opt-in
-  (`SPICE_PREFERRED_VIDEO_CODECS=h264,mjpeg`): the spice-server shipped with
-  Proxmox VE 9 crashed in testing when an H.264 stream was torn down. README ▸
-  *Video streaming* explains what the VM needs for streaming at all (`qxl` display,
-  `videostreaming` on).
+  (`SPICE_PREFERRED_VIDEO_CODECS=h264,mjpeg`): Proxmox's spice-server encodes
+  H.264 in software, about a third of a node core per stream, and only with
+  `gstreamer1.0-plugins-ugly` installed. The preference is sent once the server
+  has set the display channel up: sent earlier, while a video was playing, it
+  crashed every spice-server from 0.15.2 to master, taking the VM down
+  ([spice/spice#99](https://gitlab.freedesktop.org/spice/spice/-/issues/99)).
+  README ▸ *Video streaming* explains what the VM needs for streaming at all
+  (`qxl` display, `videostreaming` on), and
+  [docs/server-side-video.md](docs/server-side-video.md) what the node needs for
+  better video, up to H.264 on Intel Quick Sync with spice-server 0.16.
 
 ### Changed
 
@@ -31,7 +37,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `0` restores the stock behaviour). Click to the client's framebuffer in our LAN
   test: a median 154 ms instead of ~500 ms, with the same smoothness. Sounds
   shorter than a few seconds (notifications) leave its timing alone; longer ones
-  hand it back to the server's timing, lined up with the audio, 3–4 s in.
+  hand it back to the server's timing, lined up with the audio, 3–4 s in. With
+  spice-server 0.16 and later, which leave the playout delay to the client, the
+  stream reports give the delay frames really get: reporting them late made the
+  server cut MJPEG to ~8 fps and ~1 Mbit/s.
 - **MJPEG frames are decoded ahead of their display time** instead of at it: with
   four streams, frames were shown on average 2.2 ms after their time instead of
   5.8 ms (max 5 instead of 12), which also removes the "rendering too late"

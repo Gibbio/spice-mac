@@ -1,0 +1,1310 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Er Gibbio <gibbio@pm.me>
+Date: Wed, 21 Oct 2026 13:05:23 +0200
+Subject: [PATCH 13/13] audio: add a CoreAudio backend for macOS
+
+GStreamer's osxaudiosink buffers 200 ms by default, so sound came ~220 ms
+after it arrived and, with the guest playing sound for a while, the video
+followed it there. It also stays on the output device it opened: plugging
+in headphones during a session left the sound on the speakers.
+
+Play through the system's default output unit, which follows the default
+device by itself, from a ring buffer that starts playing once its target is
+buffered and again after it runs dry. The target starts at
+SPICE_COREAUDIO_BUFFER_MS (default 40). Packets normally come every ~17 ms,
+but now and then the server's audio pauses, up to ~90 ms, and then comes at
+once: with a fixed 40 ms the output ran dry 11 times in 18 min. So the
+target grows, up to 200 ms, to 10 ms above any pause that comes near it,
+and by 20 ms after an underrun all the same, and shrinks by 10 ms after
+every 5 calm minutes. Audio that stays buffered beyond the target for a
+whole second is skipped, so clock drift and bursts do not add up to delay. The delay given
+to the session is what is buffered plus the device's own latency, from the
+moment it is known. Record through an audio queue on the default input
+device, reopened when that changes.
+
+The microphone is opened only while the "record-enabled" property is set:
+the guest can start recording at any time. Read-only properties report
+whether it is recording, the buffered audio, underruns, skipped audio and
+the output latency.
+
+Calls that wait for the device (creating, starting, stopping units and
+queues) run on a serial dispatch queue, off the main context.
+SPICE_AUDIO_BACKEND=gstreamer keeps the GStreamer backend, without a record
+channel: it has no such switch and would open the microphone whenever the
+guest records.
+---
+ meson.build           |   12 +
+ src/meson.build       |    5 +
+ src/spice-audio.c     |   17 +-
+ src/spice-coreaudio.c | 1120 +++++++++++++++++++++++++++++++++++++++++
+ src/spice-coreaudio.h |   53 ++
+ 5 files changed, 1206 insertions(+), 1 deletion(-)
+ create mode 100644 src/spice-coreaudio.c
+ create mode 100644 src/spice-coreaudio.h
+
+diff --git a/meson.build b/meson.build
+index 1567d39..eca2311 100644
+--- a/meson.build
++++ b/meson.build
+@@ -238,6 +238,18 @@ if host_machine.system() == 'darwin'
+ endif
+ summary_info += {'videotoolbox': spice_gtk_has_videotoolbox}
+ 
++# CoreAudio (macOS): audio playback and recording without GStreamer
++spice_gtk_has_coreaudio = false
++if host_machine.system() == 'darwin'
++  d = dependency('appleframeworks', modules : ['AudioToolbox', 'CoreAudio'], required : false)
++  if d.found()
++    spice_glib_deps += d
++    spice_gtk_config_data.set('HAVE_COREAUDIO', '1')
++    spice_gtk_has_coreaudio = true
++  endif
++endif
++summary_info += {'coreaudio': spice_gtk_has_coreaudio}
++
+ # usbredir
+ spice_gtk_has_usbredir = false
+ usbredir_version = '0.7.1'
+diff --git a/src/meson.build b/src/meson.build
+index 908e3c9..3fad53b 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -185,6 +185,11 @@ if spice_gtk_has_videotoolbox
+   spice_client_glib_sources += 'channel-display-vt.c'
+ endif
+ 
++if spice_gtk_has_coreaudio
++  spice_client_glib_sources += ['spice-coreaudio.c',
++                                'spice-coreaudio.h']
++endif
++
+ if spice_gtk_has_polkit
+   spice_client_glib_sources += ['usb-acl-helper.c',
+                                 'usb-acl-helper.h']
+diff --git a/src/spice-audio.c b/src/spice-audio.c
+index 8a5714e..d84fbee 100644
+--- a/src/spice-audio.c
++++ b/src/spice-audio.c
+@@ -41,6 +41,9 @@
+ #include "spice-channel-priv.h"
+ #include "spice-audio-priv.h"
+ #include "spice-gstaudio.h"
++#ifdef HAVE_COREAUDIO
++#include "spice-coreaudio.h"
++#endif
+ 
+ G_STATIC_ASSERT(sizeof(SpiceAudioClass) == sizeof(GObjectClass) + 11 * sizeof(gpointer));
+ 
+@@ -144,6 +147,12 @@ static void connect_channel(SpiceAudio *self, SpiceChannel *channel)
+ {
+     if (channel->priv->state != SPICE_CHANNEL_STATE_UNCONNECTED)
+         return;
++#ifdef HAVE_COREAUDIO
++    /* Only the CoreAudio backend keeps the microphone closed until the
++     * application allows it ("record-enabled"): with another, recording is off */
++    if (SPICE_IS_RECORD_CHANNEL(channel) && !SPICE_IS_COREAUDIO(self))
++        return;
++#endif
+ 
+     if (SPICE_AUDIO_GET_CLASS(self)->connect_channel(self, channel))
+         spice_channel_connect(channel);
+@@ -233,7 +242,13 @@ SpiceAudio *spice_audio_new_priv(SpiceSession *session, GMainContext *context,
+     if (name == NULL)
+         name = g_get_application_name();
+ 
+-    self = SPICE_AUDIO(spice_gstaudio_new(session, context, name));
++#ifdef HAVE_COREAUDIO
++    /* SPICE_AUDIO_BACKEND=gstreamer keeps GStreamer's, e.g. to compare */
++    if (g_strcmp0(g_getenv("SPICE_AUDIO_BACKEND"), "gstreamer") != 0)
++        self = SPICE_AUDIO(spice_coreaudio_new(session, context, name));
++#endif
++    if (self == NULL)
++        self = SPICE_AUDIO(spice_gstaudio_new(session, context, name));
+     if (self != NULL) {
+         spice_g_signal_connect_object(session, "notify::enable-audio", G_CALLBACK(session_enable_audio), self, 0);
+         spice_g_signal_connect_object(session, "channel-new", G_CALLBACK(channel_new), self, G_CONNECT_AFTER);
+diff --git a/src/spice-coreaudio.c b/src/spice-coreaudio.c
+new file mode 100644
+index 0000000..6e48fce
+--- /dev/null
++++ b/src/spice-coreaudio.c
+@@ -0,0 +1,1120 @@
++/* -*- Mode: C; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++/*
++   Copyright (C) 2026 spice-mac contributors
++
++   This library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   This library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with this library; if not, see <http://www.gnu.org/licenses/>.
++*/
++
++/* Native macOS audio: playback through the system's default output unit, which
++ * follows the default output device by itself, and recording through an audio
++ * queue on the default input device.
++ *
++ * Playback goes through a ring buffer: the main context writes what the server
++ * sends, the output unit's real-time thread reads it. The unit starts reading
++ * once the target is buffered, and again after it runs dry. The target starts at
++ * SPICE_COREAUDIO_BUFFER_MS (default 40). Packets normally come every ~17 ms,
++ * but now and then the server's audio pauses (up to ~90 ms in our tests) and
++ * then comes all at once. So the target grows, up to 200 ms, to 10 ms more
++ * than any pause between packets that comes near it, and by 20 ms more each
++ * time the output runs dry anyway; after every 5 calm minutes it shrinks by
++ * 10 ms, down to where it started. Audio that stays buffered beyond the
++ * target for a whole second (after a burst, or as the guest's and the Mac's
++ * clocks drift) is skipped, so the delay does not grow. The delay reported to
++ * the session is what is really buffered plus the output device's own latency.
++ *
++ * CoreAudio calls that can block — starting, stopping and creating units and
++ * queues, which waits for the device — run on a serial dispatch queue, not on
++ * the main context.
++ *
++ * The microphone is opened only when "record-enabled" is set: a guest can start
++ * recording at any time, and nothing tells the user. */
++
++#include "config.h"
++
++#include <math.h>
++#include <stdatomic.h>
++#include <string.h>
++#include <AudioToolbox/AudioToolbox.h>
++#include <Block.h>
++#include <CoreAudio/CoreAudio.h>
++#include <dispatch/dispatch.h>
++
++#include "spice-coreaudio.h"
++#include "spice-common.h"
++#include "spice-session.h"
++#include "spice-util-priv.h"
++
++#define VOLUME_NORMAL 65535
++#define RING_BYTES (48000 * 4 * 2)      /* 2 s of 48 kHz stereo S16 */
++#define DEFAULT_BUFFER_MS 40
++#define MAX_BUFFER_MS 200
++#define BUFFER_GAP_MARGIN_MS 10         /* above the longest pause between packets */
++#define BUFFER_GROW_MS 20               /* after each underrun */
++#define BUFFER_SHRINK_MS 10             /* after each calm period */
++#define BUFFER_CALM_SECS 300
++#define SKIP_SLACK_MS 20                /* allowed above the target before skipping */
++#define RECORD_BUFFER_MS 20
++#define RECORD_BUFFERS 3
++
++struct playback {
++    /* touched only on the dispatch queue */
++    AudioUnit               unit;
++    /* format: set on the dispatch queue while the unit is stopped */
++    _Atomic guint           rate;
++    _Atomic guint           frame_bytes;
++    _Atomic guint           target;     /* bytes to buffer before playing */
++    _Atomic guint           device_ms;  /* the output device's latency */
++    /* the ring: written by the main context, read by the render thread */
++    guint8                  *ring;
++    _Atomic guint64         write;      /* bytes written so far */
++    _Atomic guint64         read;       /* bytes read so far */
++    _Atomic guint64         flush_to;   /* the render thread skips to here */
++    _Atomic gboolean        starved;    /* wait for `target` bytes before reading */
++    _Atomic gint            configuring; /* dispatch queue jobs on the unit pending */
++    _Atomic float           gain;
++    /* statistics, written by the render thread */
++    _Atomic guint           avg_fill;   /* bytes buffered, averaged over the last second */
++    _Atomic guint           underruns;
++    _Atomic guint64         skipped;    /* bytes */
++    /* the render thread's own once-a-second window */
++    guint64                 win_frames;
++    guint64                 win_sum;
++    guint                   win_count;
++    guint                   win_min;
++    /* main context */
++    guint                   channels;   /* as configured by the last playback-start */
++    guint                   requested_rate;
++    gboolean                playing;
++    gboolean                delay_reported;
++    guint                   timer_id;
++    guint16                 volume;
++    gboolean                mute;
++    /* the adaptive target, see the top of the file */
++    guint                   min_target_ms;
++    guint                   target_ms;
++    guint                   seen_underruns;
++    gint64                  calm_since;
++    /* the longest gap between two packets in the last second, µs */
++    gint64                  last_arrival;
++    gint64                  arrival_gap_max;
++};
++
++struct record {
++    /* touched only on the dispatch queue */
++    AudioQueueRef           queue;
++    _Atomic gboolean        running;
++    /* main context */
++    guint                   rate;
++    guint                   channels;
++    gboolean                wanted;     /* the guest is recording */
++    gboolean                enabled;    /* "record-enabled" */
++    guint16                 volume;
++    gboolean                mute;
++    _Atomic float           gain;
++    /* captured audio on its way from the queue's thread to the main context */
++    GMutex                  lock;
++    GByteArray              *pending;
++    guint                   idle_id;
++};
++
++struct _SpiceCoreaudioPrivate {
++    SpiceChannel            *pchannel;
++    SpiceChannel            *rchannel;
++    dispatch_queue_t        queue;
++    AudioObjectPropertyListenerBlock output_listener;
++    AudioObjectPropertyListenerBlock input_listener;
++    struct playback         playback;
++    struct record           record;
++};
++
++enum {
++    PROP_0,
++    PROP_RECORD_ENABLED,
++    PROP_RECORDING,
++    PROP_PLAYBACK_BUFFER,
++    PROP_PLAYBACK_TARGET,
++    PROP_PLAYBACK_UNDERRUNS,
++    PROP_PLAYBACK_SKIPPED,
++    PROP_OUTPUT_LATENCY,
++};
++
++G_DEFINE_TYPE_WITH_PRIVATE(SpiceCoreaudio, spice_coreaudio, SPICE_TYPE_AUDIO)
++
++static gboolean connect_channel(SpiceAudio *audio, SpiceChannel *channel);
++static void get_playback_volume_info_async(SpiceAudio *audio, GCancellable *cancellable,
++                                           SpiceMainChannel *main_channel,
++                                           GAsyncReadyCallback callback, gpointer user_data);
++static gboolean get_playback_volume_info_finish(SpiceAudio *audio, GAsyncResult *res,
++                                                gboolean *mute, guint8 *nchannels,
++                                                guint16 **volume, GError **error);
++static void get_record_volume_info_async(SpiceAudio *audio, GCancellable *cancellable,
++                                         SpiceMainChannel *main_channel,
++                                         GAsyncReadyCallback callback, gpointer user_data);
++static gboolean get_record_volume_info_finish(SpiceAudio *audio, GAsyncResult *res,
++                                              gboolean *mute, guint8 *nchannels,
++                                              guint16 **volume, GError **error);
++static void record_open(SpiceCoreaudio *self);
++static void record_close(SpiceCoreaudio *self);
++
++static AudioStreamBasicDescription s16_format(guint rate, guint channels)
++{
++    AudioStreamBasicDescription format = {
++        .mSampleRate = rate,
++        .mFormatID = kAudioFormatLinearPCM,
++        .mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
++        .mBytesPerPacket = 2 * channels,
++        .mFramesPerPacket = 1,
++        .mBytesPerFrame = 2 * channels,
++        .mChannelsPerFrame = channels,
++        .mBitsPerChannel = 16,
++    };
++    return format;
++}
++
++/* A guest volume (cubic, as GStreamer's sinks take it) as a linear gain */
++static float volume_gain(guint16 volume, gboolean mute)
++{
++    float v = (float)volume / VOLUME_NORMAL;
++    return mute ? 0.0f : v * v * v;
++}
++
++static void apply_gain(gint16 *samples, gsize n, float gain)
++{
++    if (gain >= 1.0f) {
++        return;
++    }
++    for (gsize i = 0; i < n; i++) {
++        samples[i] = (gint16)lrintf(samples[i] * gain);
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* Playback */
++
++/* The output device's latency in ms: its own, its safety offset, its I/O buffer
++ * and its stream's. Dispatch queue. */
++static guint output_device_latency(AudioUnit unit)
++{
++    AudioDeviceID device = kAudioObjectUnknown;
++    UInt32 size = sizeof(device), value, frames = 0;
++    Float64 rate = 0;
++    AudioObjectPropertyAddress address = {
++        kAudioDevicePropertyLatency, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain
++    };
++    static const AudioObjectPropertySelector selectors[] = {
++        kAudioDevicePropertyLatency, kAudioDevicePropertySafetyOffset, kAudioDevicePropertyBufferFrameSize,
++    };
++
++    if (AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
++                             &device, &size) != noErr || device == kAudioObjectUnknown) {
++        return 0;
++    }
++    for (guint i = 0; i < G_N_ELEMENTS(selectors); i++) {
++        address.mSelector = selectors[i];
++        size = sizeof(value);
++        if (AudioObjectGetPropertyData(device, &address, 0, NULL, &size, &value) == noErr) {
++            frames += value;
++        }
++    }
++    address.mSelector = kAudioDevicePropertyStreams;
++    AudioStreamID stream;
++    size = sizeof(stream);
++    if (AudioObjectGetPropertyData(device, &address, 0, NULL, &size, &stream) == noErr && size > 0) {
++        AudioObjectPropertyAddress latency = {
++            kAudioStreamPropertyLatency, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain
++        };
++        size = sizeof(value);
++        if (AudioObjectGetPropertyData(stream, &latency, 0, NULL, &size, &value) == noErr) {
++            frames += value;
++        }
++    }
++    address.mSelector = kAudioDevicePropertyNominalSampleRate;
++    address.mScope = kAudioObjectPropertyScopeGlobal;
++    size = sizeof(rate);
++    if (AudioObjectGetPropertyData(device, &address, 0, NULL, &size, &rate) != noErr || rate <= 0) {
++        return 0;
++    }
++    return (guint)(frames * 1000 / rate);
++}
++
++/* The output unit's real-time thread: no locks, no allocation */
++static OSStatus playback_render(void *ref, AudioUnitRenderActionFlags *flags,
++                                const AudioTimeStamp *timestamp, UInt32 bus,
++                                UInt32 nframes, AudioBufferList *io)
++{
++    struct playback *pb = ref;
++    guint frame_bytes = atomic_load(&pb->frame_bytes);
++    guint8 *out = io->mBuffers[0].mData;
++    guint want = nframes * frame_bytes;
++    guint64 r = atomic_load_explicit(&pb->read, memory_order_relaxed);
++    guint64 w = atomic_load_explicit(&pb->write, memory_order_acquire);
++    guint64 flush = atomic_load(&pb->flush_to);
++    guint n = 0;
++
++    if (flush > r) {
++        r = flush;
++    }
++    guint avail = w > r ? (guint)(w - r) : 0;
++
++    if (!atomic_load(&pb->starved)) {
++        n = MIN(avail, want);
++        n -= n % frame_bytes;
++        guint offset = r % RING_BYTES;
++        guint first = MIN(n, RING_BYTES - offset);
++        memcpy(out, pb->ring + offset, first);
++        memcpy(out + first, pb->ring, n - first);
++        apply_gain((gint16 *)out, n / 2, atomic_load(&pb->gain));
++        r += n;
++        avail -= n;
++        if (n < want) {
++            atomic_store(&pb->starved, TRUE);
++            atomic_fetch_add(&pb->underruns, 1);
++        }
++    }
++    memset(out + n, 0, want - n);
++    if (n == 0) {
++        *flags |= kAudioUnitRenderAction_OutputIsSilence;
++    }
++
++    /* once a second: the average fill, and skip what stayed above the target
++     * the whole second */
++    pb->win_frames += nframes;
++    pb->win_sum += avail;
++    pb->win_count++;
++    pb->win_min = MIN(pb->win_min, avail);
++    if (pb->win_frames >= atomic_load(&pb->rate)) {
++        guint target = atomic_load(&pb->target);
++        guint slack = SKIP_SLACK_MS * atomic_load(&pb->rate) / 1000 * frame_bytes;
++
++        atomic_store(&pb->avg_fill, (guint)(pb->win_sum / pb->win_count));
++        if (!atomic_load(&pb->starved) && pb->win_min > target + slack) {
++            guint skip = pb->win_min - target;
++            skip -= skip % frame_bytes;
++            r += skip;
++            atomic_fetch_add(&pb->skipped, skip);
++        }
++        pb->win_frames = pb->win_sum = pb->win_count = 0;
++        pb->win_min = G_MAXUINT;
++    }
++    atomic_store_explicit(&pb->read, r, memory_order_release);
++    return noErr;
++}
++
++/* Dispatch queue */
++static void playback_close_unit(struct playback *pb)
++{
++    if (pb->unit != NULL) {
++        AudioOutputUnitStop(pb->unit);
++        AudioUnitUninitialize(pb->unit);
++        AudioComponentInstanceDispose(pb->unit);
++        pb->unit = NULL;
++    }
++}
++
++/* Dispatch queue */
++static OSStatus playback_open_unit(struct playback *pb, guint rate, guint channels)
++{
++    AudioComponentDescription desc = {
++        .componentType = kAudioUnitType_Output,
++        .componentSubType = kAudioUnitSubType_DefaultOutput,
++        .componentManufacturer = kAudioUnitManufacturer_Apple,
++    };
++    AudioComponent component = AudioComponentFindNext(NULL, &desc);
++    AudioStreamBasicDescription format = s16_format(rate, channels);
++    AURenderCallbackStruct callback = { playback_render, pb };
++    OSStatus err;
++
++    if (component == NULL) {
++        return kAudioUnitErr_InvalidElement;
++    }
++    err = AudioComponentInstanceNew(component, &pb->unit);
++    if (err != noErr) {
++        pb->unit = NULL;
++        return err;
++    }
++    err = AudioUnitSetProperty(pb->unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
++                               &format, sizeof(format));
++    if (err == noErr) {
++        err = AudioUnitSetProperty(pb->unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input,
++                                   0, &callback, sizeof(callback));
++    }
++    if (err == noErr) {
++        err = AudioUnitInitialize(pb->unit);
++    }
++    if (err != noErr) {
++        AudioComponentInstanceDispose(pb->unit);
++        pb->unit = NULL;
++        return err;
++    }
++    atomic_store(&pb->rate, rate);
++    atomic_store(&pb->frame_bytes, format.mBytesPerFrame);
++    atomic_store(&pb->device_ms, output_device_latency(pb->unit));
++    pb->win_frames = pb->win_sum = pb->win_count = 0;
++    pb->win_min = G_MAXUINT;
++    return noErr;
++}
++
++static guint bytes_to_ms(struct playback *pb, guint bytes)
++{
++    guint rate = atomic_load(&pb->rate), frame_bytes = atomic_load(&pb->frame_bytes);
++
++    return rate > 0 && frame_bytes > 0 ? (guint)((guint64)bytes * 1000 / ((guint64)rate * frame_bytes)) : 0;
++}
++
++/* main context */
++static void playback_set_target(struct playback *pb, guint ms, guint rate, guint channels)
++{
++    pb->target_ms = ms;
++    atomic_store(&pb->target, ms * rate / 1000 * 2 * channels);
++}
++
++/* main context, once a second while playing: grow the target to cover the
++ * longest pause between packets of the last second, and after an underrun;
++ * shrink it after a calm period */
++static void playback_adapt_target(struct playback *pb)
++{
++    guint underruns = atomic_load(&pb->underruns);
++    gint64 now = g_get_monotonic_time();
++    guint ms = pb->target_ms;
++    guint wanted = (guint)(pb->arrival_gap_max / 1000) + BUFFER_GAP_MARGIN_MS;
++
++    if (underruns != pb->seen_underruns) {
++        pb->seen_underruns = underruns;
++        wanted = MAX(wanted, ms + BUFFER_GROW_MS);
++    }
++    if (wanted > ms) {
++        pb->calm_since = now;
++        ms = MIN(wanted, MAX_BUFFER_MS);
++    } else if (now - pb->calm_since >= BUFFER_CALM_SECS * G_USEC_PER_SEC && ms > pb->min_target_ms) {
++        pb->calm_since = now;
++        ms = MAX(ms - BUFFER_SHRINK_MS, pb->min_target_ms);
++    }
++    if (ms != pb->target_ms) {
++        SPICE_DEBUG("coreaudio: buffer target %u ms", ms);
++        playback_set_target(pb, ms, pb->requested_rate, pb->channels);
++    }
++}
++
++/* main context: the delay until the last sample received is heard */
++static void playback_report_delay(SpiceCoreaudio *self, guint buffered)
++{
++    struct playback *pb = &self->priv->playback;
++    guint delay = bytes_to_ms(pb, buffered) + atomic_load(&pb->device_ms);
++
++    if (self->priv->pchannel != NULL) {
++        spice_playback_channel_set_delay(SPICE_PLAYBACK_CHANNEL(self->priv->pchannel), delay);
++    }
++}
++
++static gboolean playback_timer(gpointer data)
++{
++    SpiceCoreaudio *self = data;
++    struct playback *pb = &self->priv->playback;
++
++    if (pb->delay_reported) {
++        playback_report_delay(self, atomic_load(&pb->avg_fill));
++    }
++    playback_adapt_target(pb);
++    SPICE_DEBUG("coreaudio: buffer %u ms (target %u), device %u ms, underruns %u, skipped %u ms, "
++                "longest gap between packets %u ms",
++                bytes_to_ms(pb, atomic_load(&pb->avg_fill)), pb->target_ms,
++                atomic_load(&pb->device_ms), atomic_load(&pb->underruns),
++                bytes_to_ms(pb, (guint)atomic_load(&pb->skipped)),
++                (guint)(pb->arrival_gap_max / 1000));
++    pb->arrival_gap_max = 0;
++    return G_SOURCE_CONTINUE;
++}
++
++static void playback_start(SpicePlaybackChannel *channel, gint format, gint channels,
++                           gint frequency, gpointer data)
++{
++    SpiceCoreaudio *self = data;
++    SpiceCoreaudioPrivate *p = self->priv;
++    struct playback *pb = &p->playback;
++    gboolean reopen;
++
++    g_return_if_fail(format == SPICE_AUDIO_FMT_S16);
++    g_return_if_fail(channels > 0 && channels <= 2 && frequency > 0);
++
++    SPICE_DEBUG("coreaudio: playback start, %d Hz, %d channels", frequency, channels);
++    reopen = pb->requested_rate != (guint)frequency || pb->channels != (guint)channels;
++    pb->requested_rate = frequency;
++    pb->channels = channels;
++    if (reopen) {
++        /* a new format starts again from the minimum; the target otherwise
++         * carries over, the bursts being the connection's */
++        const gchar *env = g_getenv("SPICE_COREAUDIO_BUFFER_MS");
++
++        pb->min_target_ms = env != NULL ? (guint)atoi(env) : DEFAULT_BUFFER_MS;
++        playback_set_target(pb, pb->min_target_ms, frequency, channels);
++        pb->calm_since = g_get_monotonic_time();
++    }
++    pb->last_arrival = 0;
++    pb->playing = TRUE;
++    pb->delay_reported = FALSE;
++    atomic_store(&pb->flush_to, atomic_load(&pb->write));
++    atomic_store(&pb->starved, TRUE);
++    atomic_fetch_add(&pb->configuring, 1);
++    dispatch_async(p->queue, ^{
++        OSStatus err = noErr;
++
++        if (reopen || pb->unit == NULL) {
++            playback_close_unit(pb);
++            err = playback_open_unit(pb, frequency, channels);
++        }
++        if (err == noErr) {
++            err = AudioOutputUnitStart(pb->unit);
++        }
++        if (err != noErr) {
++            g_warning("coreaudio: could not start playback: %d", (int)err);
++        }
++        atomic_fetch_sub(&pb->configuring, 1);
++    });
++    if (pb->timer_id == 0) {
++        pb->timer_id = g_spice_timeout_add_seconds(1, playback_timer, self);
++    }
++}
++
++static void playback_stop(SpiceCoreaudio *self)
++{
++    SpiceCoreaudioPrivate *p = self->priv;
++    struct playback *pb = &p->playback;
++
++    SPICE_DEBUG("coreaudio: playback stop");
++    pb->playing = FALSE;
++    atomic_store(&pb->flush_to, atomic_load(&pb->write));
++    atomic_store(&pb->starved, TRUE);
++    atomic_fetch_add(&pb->configuring, 1);
++    dispatch_async(p->queue, ^{
++        if (pb->unit != NULL) {
++            AudioOutputUnitStop(pb->unit);
++        }
++        atomic_fetch_sub(&pb->configuring, 1);
++    });
++    if (pb->timer_id != 0) {
++        g_spice_source_remove(pb->timer_id);
++        pb->timer_id = 0;
++    }
++}
++
++static void playback_data(SpicePlaybackChannel *channel, gpointer *audio, gint size, gpointer data)
++{
++    SpiceCoreaudio *self = data;
++    struct playback *pb = &self->priv->playback;
++    guint64 w = atomic_load_explicit(&pb->write, memory_order_relaxed);
++    guint64 r = atomic_load_explicit(&pb->read, memory_order_acquire);
++    guint64 flush = atomic_load(&pb->flush_to);
++    guint64 used = w - MAX(r, MIN(flush, w));
++
++    if (size <= 0 || !pb->playing) {
++        return;
++    }
++    gint64 now = g_get_monotonic_time();
++    if (pb->last_arrival != 0) {
++        pb->arrival_gap_max = MAX(pb->arrival_gap_max, now - pb->last_arrival);
++    }
++    pb->last_arrival = now;
++    if (used + size > RING_BYTES) {
++        /* nothing has been reading: the unit could not start */
++        return;
++    }
++    guint offset = w % RING_BYTES;
++    guint first = MIN((guint)size, RING_BYTES - offset);
++    memcpy(pb->ring + offset, audio, first);
++    memcpy(pb->ring, (guint8 *)audio + first, size - first);
++    atomic_store_explicit(&pb->write, w + size, memory_order_release);
++    used += size;
++
++    if (atomic_load(&pb->starved) && atomic_load(&pb->configuring) == 0 &&
++        used >= atomic_load(&pb->target)) {
++        atomic_store(&pb->starved, FALSE);
++        if (!pb->delay_reported) {
++            /* the delay is known from now on: before, it would read as if the
++             * audio were heard the moment it arrives, see patch 0008 */
++            pb->delay_reported = TRUE;
++            playback_report_delay(self, (guint)used);
++        }
++    }
++}
++
++static void playback_volume_changed(GObject *object, GParamSpec *pspec, gpointer data)
++{
++    SpiceCoreaudio *self = data;
++    struct playback *pb = &self->priv->playback;
++    guint16 *volume = NULL;
++    guint nchannels = 0;
++
++    g_object_get(object, "volume", &volume, "nchannels", &nchannels, NULL);
++    g_return_if_fail(nchannels > 0 && volume != NULL);
++    pb->volume = volume[0];
++    SPICE_DEBUG("coreaudio: playback volume %u", pb->volume);
++    atomic_store(&pb->gain, volume_gain(pb->volume, pb->mute));
++}
++
++static void playback_mute_changed(GObject *object, GParamSpec *pspec, gpointer data)
++{
++    SpiceCoreaudio *self = data;
++    struct playback *pb = &self->priv->playback;
++
++    g_object_get(object, "mute", &pb->mute, NULL);
++    SPICE_DEBUG("coreaudio: playback mute %d", pb->mute);
++    atomic_store(&pb->gain, volume_gain(pb->volume, pb->mute));
++}
++
++/* ------------------------------------------------------------------ */
++/* Recording */
++
++/* main context: hand what was captured to the record channel */
++static gboolean record_flush(gpointer data)
++{
++    SpiceCoreaudio *self = data;
++    struct record *rec = &self->priv->record;
++    GByteArray *chunk;
++
++    g_mutex_lock(&rec->lock);
++    chunk = rec->pending;
++    rec->pending = g_byte_array_new();
++    rec->idle_id = 0;
++    g_mutex_unlock(&rec->lock);
++
++    if (self->priv->rchannel != NULL && rec->wanted && rec->enabled && chunk->len > 0) {
++        apply_gain((gint16 *)chunk->data, chunk->len / 2, atomic_load(&rec->gain));
++        spice_record_channel_send_data(SPICE_RECORD_CHANNEL(self->priv->rchannel),
++                                       chunk->data, chunk->len, 0);
++    }
++    g_byte_array_unref(chunk);
++    return G_SOURCE_REMOVE;
++}
++
++/* The audio queue's own thread */
++static void record_input(void *ref, AudioQueueRef queue, AudioQueueBufferRef buffer,
++                         const AudioTimeStamp *start, UInt32 npackets,
++                         const AudioStreamPacketDescription *descriptions)
++{
++    SpiceCoreaudio *self = ref;
++    struct record *rec = &self->priv->record;
++
++    if (buffer->mAudioDataByteSize > 0) {
++        g_mutex_lock(&rec->lock);
++        g_byte_array_append(rec->pending, buffer->mAudioData, buffer->mAudioDataByteSize);
++        if (rec->idle_id == 0) {
++            rec->idle_id = g_spice_idle_add(record_flush, self);
++        }
++        g_mutex_unlock(&rec->lock);
++    }
++    if (atomic_load(&rec->running)) {
++        AudioQueueEnqueueBuffer(queue, buffer, 0, NULL);
++    }
++}
++
++/* Dispatch queue */
++static void record_close_queue(struct record *rec)
++{
++    if (rec->queue != NULL) {
++        atomic_store(&rec->running, FALSE);
++        AudioQueueStop(rec->queue, true);
++        AudioQueueDispose(rec->queue, true);
++        rec->queue = NULL;
++    }
++}
++
++/* Dispatch queue. The first time, this is where macOS asks the user whether
++ * SpiceMac may use the microphone. */
++static void record_open_queue(SpiceCoreaudio *self, guint rate, guint channels)
++{
++    struct record *rec = &self->priv->record;
++    AudioStreamBasicDescription format = s16_format(rate, channels);
++    guint buffer_bytes = rate * RECORD_BUFFER_MS / 1000 * format.mBytesPerFrame;
++    OSStatus err;
++
++    if (rec->queue != NULL) {
++        return;
++    }
++    err = AudioQueueNewInput(&format, record_input, self, NULL, kCFRunLoopCommonModes, 0, &rec->queue);
++    if (err != noErr) {
++        g_warning("coreaudio: could not open the microphone: %d", (int)err);
++        rec->queue = NULL;
++        return;
++    }
++    for (guint i = 0; i < RECORD_BUFFERS && err == noErr; i++) {
++        AudioQueueBufferRef buffer;
++
++        err = AudioQueueAllocateBuffer(rec->queue, buffer_bytes, &buffer);
++        if (err == noErr) {
++            err = AudioQueueEnqueueBuffer(rec->queue, buffer, 0, NULL);
++        }
++    }
++    atomic_store(&rec->running, TRUE);
++    if (err == noErr) {
++        err = AudioQueueStart(rec->queue, NULL);
++    }
++    if (err != noErr) {
++        g_warning("coreaudio: could not start recording: %d", (int)err);
++        record_close_queue(rec);
++    }
++}
++
++static void record_open(SpiceCoreaudio *self)
++{
++    struct record *rec = &self->priv->record;
++    guint rate = rec->rate, channels = rec->channels;
++
++    SPICE_DEBUG("coreaudio: microphone on, %u Hz, %u channels", rate, channels);
++    dispatch_async(self->priv->queue, ^{
++        record_open_queue(self, rate, channels);
++    });
++}
++
++static void record_close(SpiceCoreaudio *self)
++{
++    struct record *rec = &self->priv->record;
++
++    SPICE_DEBUG("coreaudio: microphone off");
++    dispatch_async(self->priv->queue, ^{
++        record_close_queue(rec);
++    });
++}
++
++static void record_start(SpiceRecordChannel *channel, gint format, gint channels,
++                         gint frequency, gpointer data)
++{
++    SpiceCoreaudio *self = data;
++    struct record *rec = &self->priv->record;
++    gboolean reopen = rec->wanted && (rec->rate != (guint)frequency || rec->channels != (guint)channels);
++
++    g_return_if_fail(format == SPICE_AUDIO_FMT_S16);
++    g_return_if_fail(channels > 0 && channels <= 2 && frequency > 0);
++
++    SPICE_DEBUG("coreaudio: the guest starts recording, %d Hz, %d channels%s", frequency, channels,
++                rec->enabled ? "" : " (microphone not shared)");
++    if (reopen && rec->enabled) {
++        record_close(self);
++    }
++    rec->rate = frequency;
++    rec->channels = channels;
++    rec->wanted = TRUE;
++    if (rec->enabled) {
++        record_open(self);
++    }
++    g_object_notify(G_OBJECT(self), "recording");
++}
++
++static void record_stop(SpiceCoreaudio *self)
++{
++    struct record *rec = &self->priv->record;
++
++    SPICE_DEBUG("coreaudio: the guest stops recording");
++    if (rec->wanted && rec->enabled) {
++        record_close(self);
++    }
++    rec->wanted = FALSE;
++    g_object_notify(G_OBJECT(self), "recording");
++}
++
++static void record_volume_changed(GObject *object, GParamSpec *pspec, gpointer data)
++{
++    SpiceCoreaudio *self = data;
++    struct record *rec = &self->priv->record;
++    guint16 *volume = NULL;
++    guint nchannels = 0;
++
++    g_object_get(object, "volume", &volume, "nchannels", &nchannels, NULL);
++    g_return_if_fail(nchannels > 0 && volume != NULL);
++    rec->volume = volume[0];
++    atomic_store(&rec->gain, volume_gain(rec->volume, rec->mute));
++}
++
++static void record_mute_changed(GObject *object, GParamSpec *pspec, gpointer data)
++{
++    SpiceCoreaudio *self = data;
++    struct record *rec = &self->priv->record;
++
++    g_object_get(object, "mute", &rec->mute, NULL);
++    atomic_store(&rec->gain, volume_gain(rec->volume, rec->mute));
++}
++
++static void set_record_enabled(SpiceCoreaudio *self, gboolean enabled)
++{
++    struct record *rec = &self->priv->record;
++
++    if (rec->enabled == enabled) {
++        return;
++    }
++    rec->enabled = enabled;
++    if (rec->wanted) {
++        if (enabled) {
++            record_open(self);
++        } else {
++            record_close(self);
++        }
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* Object */
++
++static void channel_weak_notified(gpointer data, GObject *where_the_object_was)
++{
++    SpiceCoreaudio *self = data;
++    SpiceCoreaudioPrivate *p = self->priv;
++
++    if (where_the_object_was == (GObject *)p->pchannel) {
++        SPICE_DEBUG("coreaudio: playback channel gone");
++        p->pchannel = NULL;
++        playback_stop(self);
++    } else if (where_the_object_was == (GObject *)p->rchannel) {
++        SPICE_DEBUG("coreaudio: record channel gone");
++        p->rchannel = NULL;
++        record_stop(self);
++    }
++}
++
++static gboolean connect_channel(SpiceAudio *audio, SpiceChannel *channel)
++{
++    SpiceCoreaudio *self = SPICE_COREAUDIO(audio);
++    SpiceCoreaudioPrivate *p = self->priv;
++
++    if (SPICE_IS_PLAYBACK_CHANNEL(channel)) {
++        if (p->pchannel) {
++            SPICE_DEBUG("coreaudio: replacing playback channel");
++            g_object_weak_unref(G_OBJECT(p->pchannel), channel_weak_notified, self);
++            playback_stop(self);
++        }
++        p->pchannel = channel;
++        g_object_weak_ref(G_OBJECT(channel), channel_weak_notified, self);
++        spice_g_signal_connect_object(channel, "playback-start",
++                                      G_CALLBACK(playback_start), self, 0);
++        spice_g_signal_connect_object(channel, "playback-data",
++                                      G_CALLBACK(playback_data), self, 0);
++        spice_g_signal_connect_object(channel, "playback-stop",
++                                      G_CALLBACK(playback_stop), self, G_CONNECT_SWAPPED);
++        spice_g_signal_connect_object(channel, "notify::volume",
++                                      G_CALLBACK(playback_volume_changed), self, 0);
++        spice_g_signal_connect_object(channel, "notify::mute",
++                                      G_CALLBACK(playback_mute_changed), self, 0);
++        return TRUE;
++    }
++
++    if (SPICE_IS_RECORD_CHANNEL(channel)) {
++        if (p->rchannel) {
++            SPICE_DEBUG("coreaudio: replacing record channel");
++            g_object_weak_unref(G_OBJECT(p->rchannel), channel_weak_notified, self);
++            record_stop(self);
++        }
++        p->rchannel = channel;
++        g_object_weak_ref(G_OBJECT(channel), channel_weak_notified, self);
++        spice_g_signal_connect_object(channel, "record-start",
++                                      G_CALLBACK(record_start), self, 0);
++        spice_g_signal_connect_object(channel, "record-stop",
++                                      G_CALLBACK(record_stop), self, G_CONNECT_SWAPPED);
++        spice_g_signal_connect_object(channel, "notify::volume",
++                                      G_CALLBACK(record_volume_changed), self, 0);
++        spice_g_signal_connect_object(channel, "notify::mute",
++                                      G_CALLBACK(record_mute_changed), self, 0);
++        return TRUE;
++    }
++
++    return FALSE;
++}
++
++static void spice_coreaudio_init(SpiceCoreaudio *self)
++{
++    SpiceCoreaudioPrivate *p = spice_coreaudio_get_instance_private(self);
++    struct playback *pb = &p->playback;
++    struct record *rec = &p->record;
++    AudioObjectPropertyAddress output = {
++        kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
++        kAudioObjectPropertyElementMain
++    };
++    AudioObjectPropertyAddress input = {
++        kAudioHardwarePropertyDefaultInputDevice, kAudioObjectPropertyScopeGlobal,
++        kAudioObjectPropertyElementMain
++    };
++
++    self->priv = p;
++    p->queue = dispatch_queue_create("spice.coreaudio", DISPATCH_QUEUE_SERIAL);
++    pb->ring = g_malloc0(RING_BYTES);
++    atomic_store(&pb->starved, TRUE);
++    atomic_store(&pb->gain, 1.0f);
++    pb->volume = VOLUME_NORMAL;
++    pb->win_min = G_MAXUINT;
++    g_mutex_init(&rec->lock);
++    rec->pending = g_byte_array_new();
++    rec->volume = VOLUME_NORMAL;
++    atomic_store(&rec->gain, 1.0f);
++
++    /* The default output unit moves to a new default device by itself; only
++     * its latency needs measuring again. The input queue must be reopened. */
++    p->output_listener = Block_copy(^(UInt32 n, const AudioObjectPropertyAddress *addresses) {
++        if (pb->unit != NULL) {
++            atomic_store(&pb->device_ms, output_device_latency(pb->unit));
++        }
++    });
++    p->input_listener = Block_copy(^(UInt32 n, const AudioObjectPropertyAddress *addresses) {
++        if (rec->queue != NULL) {
++            const AudioStreamBasicDescription *format = NULL;
++            AudioStreamBasicDescription current;
++            UInt32 size = sizeof(current);
++
++            if (AudioQueueGetProperty(rec->queue, kAudioQueueProperty_StreamDescription,
++                                      &current, &size) == noErr) {
++                format = &current;
++            }
++            record_close_queue(rec);
++            if (format != NULL) {
++                record_open_queue(self, (guint)format->mSampleRate, format->mChannelsPerFrame);
++            }
++        }
++    });
++    AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &output, p->queue, p->output_listener);
++    AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &input, p->queue, p->input_listener);
++}
++
++static void spice_coreaudio_dispose(GObject *object)
++{
++    SpiceCoreaudio *self = SPICE_COREAUDIO(object);
++    SpiceCoreaudioPrivate *p = self->priv;
++
++    SPICE_DEBUG("%s", __FUNCTION__);
++    if (p->playback.timer_id != 0) {
++        g_spice_source_remove(p->playback.timer_id);
++        p->playback.timer_id = 0;
++    }
++    if (p->queue != NULL) {
++        AudioObjectPropertyAddress output = {
++            kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
++            kAudioObjectPropertyElementMain
++        };
++        AudioObjectPropertyAddress input = {
++            kAudioHardwarePropertyDefaultInputDevice, kAudioObjectPropertyScopeGlobal,
++            kAudioObjectPropertyElementMain
++        };
++
++        /* after this, no unit, queue or listener calls back any more */
++        dispatch_sync(p->queue, ^{
++            AudioObjectRemovePropertyListenerBlock(kAudioObjectSystemObject, &output, p->queue,
++                                                   p->output_listener);
++            AudioObjectRemovePropertyListenerBlock(kAudioObjectSystemObject, &input, p->queue,
++                                                   p->input_listener);
++            playback_close_unit(&p->playback);
++            record_close_queue(&p->record);
++        });
++        Block_release(p->output_listener);
++        Block_release(p->input_listener);
++        dispatch_release(p->queue);
++        p->queue = NULL;
++    }
++    g_mutex_lock(&p->record.lock);
++    if (p->record.idle_id != 0) {
++        g_spice_source_remove(p->record.idle_id);
++        p->record.idle_id = 0;
++    }
++    g_mutex_unlock(&p->record.lock);
++
++    if (p->pchannel) {
++        g_object_weak_unref(G_OBJECT(p->pchannel), channel_weak_notified, self);
++        p->pchannel = NULL;
++    }
++    if (p->rchannel) {
++        g_object_weak_unref(G_OBJECT(p->rchannel), channel_weak_notified, self);
++        p->rchannel = NULL;
++    }
++
++    G_OBJECT_CLASS(spice_coreaudio_parent_class)->dispose(object);
++}
++
++static void spice_coreaudio_finalize(GObject *object)
++{
++    SpiceCoreaudioPrivate *p = SPICE_COREAUDIO(object)->priv;
++
++    g_free(p->playback.ring);
++    g_byte_array_unref(p->record.pending);
++    g_mutex_clear(&p->record.lock);
++
++    G_OBJECT_CLASS(spice_coreaudio_parent_class)->finalize(object);
++}
++
++static void spice_coreaudio_get_property(GObject *object, guint prop_id, GValue *value,
++                                         GParamSpec *pspec)
++{
++    SpiceCoreaudioPrivate *p = SPICE_COREAUDIO(object)->priv;
++    struct playback *pb = &p->playback;
++
++    switch (prop_id) {
++    case PROP_RECORD_ENABLED:
++        g_value_set_boolean(value, p->record.enabled);
++        break;
++    case PROP_RECORDING:
++        g_value_set_boolean(value, p->record.wanted);
++        break;
++    case PROP_PLAYBACK_BUFFER:
++        g_value_set_uint(value, pb->playing ? bytes_to_ms(pb, atomic_load(&pb->avg_fill)) : 0);
++        break;
++    case PROP_PLAYBACK_TARGET:
++        g_value_set_uint(value, pb->target_ms);
++        break;
++    case PROP_PLAYBACK_UNDERRUNS:
++        g_value_set_uint(value, atomic_load(&pb->underruns));
++        break;
++    case PROP_PLAYBACK_SKIPPED:
++        g_value_set_uint(value, bytes_to_ms(pb, (guint)atomic_load(&pb->skipped)));
++        break;
++    case PROP_OUTPUT_LATENCY:
++        g_value_set_uint(value, atomic_load(&pb->device_ms));
++        break;
++    default:
++        G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
++        break;
++    }
++}
++
++static void spice_coreaudio_set_property(GObject *object, guint prop_id, const GValue *value,
++                                         GParamSpec *pspec)
++{
++    switch (prop_id) {
++    case PROP_RECORD_ENABLED:
++        set_record_enabled(SPICE_COREAUDIO(object), g_value_get_boolean(value));
++        break;
++    default:
++        G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
++        break;
++    }
++}
++
++static void spice_coreaudio_class_init(SpiceCoreaudioClass *klass)
++{
++    GObjectClass *gobject_class = G_OBJECT_CLASS(klass);
++    SpiceAudioClass *audio_class = SPICE_AUDIO_CLASS(klass);
++
++    gobject_class->dispose = spice_coreaudio_dispose;
++    gobject_class->finalize = spice_coreaudio_finalize;
++    gobject_class->get_property = spice_coreaudio_get_property;
++    gobject_class->set_property = spice_coreaudio_set_property;
++    audio_class->connect_channel = connect_channel;
++    audio_class->get_playback_volume_info_async = get_playback_volume_info_async;
++    audio_class->get_playback_volume_info_finish = get_playback_volume_info_finish;
++    audio_class->get_record_volume_info_async = get_record_volume_info_async;
++    audio_class->get_record_volume_info_finish = get_record_volume_info_finish;
++
++    g_object_class_install_property(gobject_class, PROP_RECORD_ENABLED,
++        g_param_spec_boolean("record-enabled", "Record enabled",
++                             "Whether the guest may record from the microphone",
++                             FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
++    g_object_class_install_property(gobject_class, PROP_RECORDING,
++        g_param_spec_boolean("recording", "Recording", "Whether the guest is recording",
++                             FALSE, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
++    g_object_class_install_property(gobject_class, PROP_PLAYBACK_BUFFER,
++        g_param_spec_uint("playback-buffer", "Playback buffer",
++                          "Audio buffered before the output device, ms, averaged over a second",
++                          0, G_MAXUINT, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
++    g_object_class_install_property(gobject_class, PROP_PLAYBACK_TARGET,
++        g_param_spec_uint("playback-target", "Playback target",
++                          "Audio buffered before playing starts, ms; grows after underruns",
++                          0, G_MAXUINT, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
++    g_object_class_install_property(gobject_class, PROP_PLAYBACK_UNDERRUNS,
++        g_param_spec_uint("playback-underruns", "Playback underruns",
++                          "Times the output ran out of audio",
++                          0, G_MAXUINT, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
++    g_object_class_install_property(gobject_class, PROP_PLAYBACK_SKIPPED,
++        g_param_spec_uint("playback-skipped", "Playback skipped",
++                          "Audio skipped to keep the delay down, ms",
++                          0, G_MAXUINT, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
++    g_object_class_install_property(gobject_class, PROP_OUTPUT_LATENCY,
++        g_param_spec_uint("output-latency", "Output latency", "The output device's latency, ms",
++                          0, G_MAXUINT, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
++}
++
++SpiceCoreaudio *spice_coreaudio_new(SpiceSession *session, GMainContext *context,
++                                    const char *name)
++{
++    return g_object_new(SPICE_TYPE_COREAUDIO,
++                        "session", session,
++                        "main-context", context,
++                        NULL);
++}
++
++/* ------------------------------------------------------------------ */
++/* Volume info: what the guest set last (the volume the agent syncs at connect) */
++
++static void volume_info_async(SpiceAudio *audio, GCancellable *cancellable,
++                              GAsyncReadyCallback callback, gpointer user_data)
++{
++    GTask *task = g_task_new(audio, cancellable, callback, user_data);
++
++    g_task_return_boolean(task, TRUE);
++    g_object_unref(task);
++}
++
++static gboolean volume_info_finish(SpiceAudio *audio, GAsyncResult *res, guint16 level, gboolean muted,
++                                   guint channels, gboolean *mute, guint8 *nchannels,
++                                   guint16 **volume, GError **error)
++{
++    GTask *task = G_TASK(res);
++
++    g_return_val_if_fail(g_task_is_valid(task, audio), FALSE);
++    if (g_task_had_error(task)) {
++        if (volume != NULL) {
++            *volume = NULL;
++        }
++        return g_task_propagate_boolean(task, error);
++    }
++    channels = channels > 0 ? channels : 2;
++    if (mute != NULL) {
++        *mute = muted;
++    }
++    if (nchannels != NULL) {
++        *nchannels = channels;
++    }
++    if (volume != NULL) {
++        *volume = g_new(guint16, channels);
++        for (guint i = 0; i < channels; i++) {
++            (*volume)[i] = level;
++        }
++    }
++    return g_task_propagate_boolean(task, error);
++}
++
++static void get_playback_volume_info_async(SpiceAudio *audio, GCancellable *cancellable,
++                                           SpiceMainChannel *main_channel,
++                                           GAsyncReadyCallback callback, gpointer user_data)
++{
++    volume_info_async(audio, cancellable, callback, user_data);
++}
++
++static gboolean get_playback_volume_info_finish(SpiceAudio *audio, GAsyncResult *res,
++                                                gboolean *mute, guint8 *nchannels,
++                                                guint16 **volume, GError **error)
++{
++    struct playback *pb = &SPICE_COREAUDIO(audio)->priv->playback;
++
++    return volume_info_finish(audio, res, pb->volume, pb->mute, pb->channels,
++                              mute, nchannels, volume, error);
++}
++
++static void get_record_volume_info_async(SpiceAudio *audio, GCancellable *cancellable,
++                                         SpiceMainChannel *main_channel,
++                                         GAsyncReadyCallback callback, gpointer user_data)
++{
++    volume_info_async(audio, cancellable, callback, user_data);
++}
++
++static gboolean get_record_volume_info_finish(SpiceAudio *audio, GAsyncResult *res,
++                                              gboolean *mute, guint8 *nchannels,
++                                              guint16 **volume, GError **error)
++{
++    struct record *rec = &SPICE_COREAUDIO(audio)->priv->record;
++
++    return volume_info_finish(audio, res, rec->volume, rec->mute, rec->channels,
++                              mute, nchannels, volume, error);
++}
+diff --git a/src/spice-coreaudio.h b/src/spice-coreaudio.h
+new file mode 100644
+index 0000000..4f7af3a
+--- /dev/null
++++ b/src/spice-coreaudio.h
+@@ -0,0 +1,53 @@
++/* -*- Mode: C; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++/*
++   Copyright (C) 2026 spice-mac contributors
++
++   This library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   This library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with this library; if not, see <http://www.gnu.org/licenses/>.
++*/
++#pragma once
++
++#include "spice-client.h"
++#include "spice-audio.h"
++
++G_BEGIN_DECLS
++
++#define SPICE_TYPE_COREAUDIO            (spice_coreaudio_get_type())
++#define SPICE_COREAUDIO(obj)            (G_TYPE_CHECK_INSTANCE_CAST((obj), SPICE_TYPE_COREAUDIO, SpiceCoreaudio))
++#define SPICE_COREAUDIO_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST((klass), SPICE_TYPE_COREAUDIO, SpiceCoreaudioClass))
++#define SPICE_IS_COREAUDIO(obj)         (G_TYPE_CHECK_INSTANCE_TYPE((obj), SPICE_TYPE_COREAUDIO))
++#define SPICE_IS_COREAUDIO_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE((klass), SPICE_TYPE_COREAUDIO))
++#define SPICE_COREAUDIO_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS((obj), SPICE_TYPE_COREAUDIO, SpiceCoreaudioClass))
++
++
++typedef struct _SpiceCoreaudio SpiceCoreaudio;
++typedef struct _SpiceCoreaudioClass SpiceCoreaudioClass;
++typedef struct _SpiceCoreaudioPrivate SpiceCoreaudioPrivate;
++
++struct _SpiceCoreaudio {
++    SpiceAudio parent;
++    SpiceCoreaudioPrivate *priv;
++    /* Do not add fields to this struct */
++};
++
++struct _SpiceCoreaudioClass {
++    SpiceAudioClass parent_class;
++    /* Do not add fields to this struct */
++};
++
++GType spice_coreaudio_get_type(void);
++
++SpiceCoreaudio *spice_coreaudio_new(SpiceSession *session,
++                                    GMainContext *context, const char *name);
++
++G_END_DECLS

@@ -86,6 +86,25 @@ extension Preferences {
     static let videoCodecsFromEnvironment = ProcessInfo.processInfo.environment["SPICE_PREFERRED_VIDEO_CODECS"] != nil
     static let videoDelayFromEnvironment = ProcessInfo.processInfo.environment["SPICE_STREAM_PLAYOUT_MS"] != nil
 
+    /// SPICE_AUDIO_BACKEND=gstreamer: GStreamer's audio output, which spice-gtk
+    /// (patch 0013) gives no record channel, so there is no microphone to share.
+    static let gstreamerAudio = ProcessInfo.processInfo.environment["SPICE_AUDIO_BACKEND"] == "gstreamer"
+
+    private static let shareMicrophoneKey = "ShareMicrophone"
+
+    /// Whether the guest may record from the Mac's microphone. Default off: a
+    /// guest can start recording at any time and nothing would tell the user;
+    /// with it on, macOS asks once whether SpiceMac may use the microphone.
+    /// Applies to open connections at once; changing it posts
+    /// `.microphoneSettingChanged`.
+    static var shareMicrophone: Bool {
+        get { UserDefaults.standard.bool(forKey: shareMicrophoneKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: shareMicrophoneKey)
+            NotificationCenter.default.post(name: .microphoneSettingChanged, object: nil)
+        }
+    }
+
     private static let showStatisticsKey = "ShowStatistics"
 
     /// Whether each window shows the statistics overlay. Default off. Changing it
@@ -131,4 +150,5 @@ extension Notification.Name {
     static let hideHostCursorChanged = Notification.Name("SpiceMac.hideHostCursorChanged")
     static let videoSettingsChanged = Notification.Name("SpiceMac.videoSettingsChanged")
     static let showStatisticsChanged = Notification.Name("SpiceMac.showStatisticsChanged")
+    static let microphoneSettingChanged = Notification.Name("SpiceMac.microphoneSettingChanged")
 }

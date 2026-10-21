@@ -43,6 +43,16 @@ public final class SpiceClient: NSObject, ObservableObject {
     /// disable it for untrusted VMs.
     public var shareClipboard: Bool = true
 
+    /// Whether the guest may record from the Mac's microphone. Default off: the
+    /// guest can start recording at any time. Set before `connect()` or while
+    /// connected; a change applies at once.
+    public var shareMicrophone = false {
+        didSet {
+            guard shareMicrophone != oldValue else { return }
+            connection?.microphoneEnabled = shareMicrophone
+        }
+    }
+
     /// USB redirection manager for the active connection, if any.
     public var usbManager: CSUSBManager? { connection?.usbManager }
 
@@ -138,6 +148,8 @@ public final class SpiceClient: NSObject, ObservableObject {
                           ca: parameters.caPEM,
                           certSubject: parameters.certSubject)
         }
+
+        conn.microphoneEnabled = shareMicrophone
 
         // Applied by CocoaSpice to each display channel as it opens.
         if let preferredVideoCodecs {

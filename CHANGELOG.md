@@ -34,6 +34,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   once: the server restarts its streams with the new codec, and the next frame
   takes the new delay. `SPICE_PREFERRED_VIDEO_CODECS` and
   `SPICE_STREAM_PLAYOUT_MS` at launch override them.
+- **Native audio (CoreAudio)** instead of GStreamer's output: sound is 60–130 ms
+  behind the guest instead of ~220 ms, and plays through the system's default
+  output unit, which follows the Mac's output device when it changes (headphones,
+  AirPods). With a continuous tone in the guest the video, which follows the audio
+  then, was shown 69 ms after arrival instead of 225 ms, with 4 late frames
+  instead of 25. The buffer adapts to the pauses of up to ~130 ms that the audio
+  stream has on the Mac's Wi-Fi: over 15 min, two dropouts in the first minute and
+  none after (a fixed buffer: 11 in 18 min). `SPICE_AUDIO_BACKEND=gstreamer` brings
+  the old output back, without the microphone.
+- **Connection ▸ Share Microphone with VM**, off by default: until it is on, a VM
+  that records gets no sound, and SpiceMac never opens the Mac's microphone.
 - **View ▸ Show Statistics** (⌃⌘I): a panel over the display with bandwidth by
   channel, TCP round trip, TLS, the Mac's frame rate and upload-to-screen time,
   each video stream's codec, decoder, frame rates, late and dropped frames and
@@ -68,6 +79,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A VM recording from the microphone could get SpiceMac terminated.** The record
+  channel opened the Mac's microphone as soon as the guest recorded, and the app
+  declared no microphone usage, which macOS punishes by killing the process. The
+  microphone is now opt-in (above), and macOS asks before its first use.
 - **Video froze for ~1.5 s whenever the guest started a sound**, and the server
   then lowered the stream's frame rate: the audio backend reported a 0 ms output
   delay before its pipeline was running, which ran the clock ahead of every

@@ -166,6 +166,10 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
             forName: .showStatisticsChanged, object: nil, queue: .main) { [weak self] _ in
             self?.updateStatisticsOverlay()
         })
+        notificationObservers.append(center.addObserver(
+            forName: .microphoneSettingChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.client.shareMicrophone = Preferences.shareMicrophone
+        })
     }
 
     /// Connection ▸ Prefer H.264 Video and Video Delay, unless the launch
@@ -213,7 +217,8 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
                 statistics: statistics,
                 present: self.displayView.presentTotals,
                 guestSize: self.displayView.attachedDisplay?.displaySize ?? .zero,
-                agentConnected: self.client.agentConnected)
+                agentConnected: self.client.agentConnected,
+                microphoneShared: self.client.shareMicrophone)
             self.setStatisticsText(self.statisticsFormatter.text(for: sample))
         }
     }

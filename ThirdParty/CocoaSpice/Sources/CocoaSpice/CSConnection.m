@@ -44,6 +44,7 @@
 // spice-mac: storage for CSConnection (Streaming)
 @property (atomic, copy, nullable) NSArray<NSNumber *> *videoCodecsSetting;
 @property (atomic) NSInteger playoutDelaySetting;
+@property (atomic) BOOL microphoneSetting;
 
 @end
 
@@ -74,6 +75,12 @@
 @property (nonatomic, readwrite) BOOL audioPlaying;
 @property (nonatomic, readwrite, copy, nullable) NSString *audioCodec;
 @property (nonatomic, readwrite) NSInteger audioDelay;
+@property (nonatomic, readwrite) NSInteger audioBuffered;
+@property (nonatomic, readwrite) NSInteger audioBufferTarget;
+@property (nonatomic, readwrite) NSInteger audioDeviceLatency;
+@property (nonatomic, readwrite) NSInteger audioUnderruns;
+@property (nonatomic, readwrite) NSInteger audioSkipped;
+@property (nonatomic, readwrite) BOOL guestRecording;
 @property (nonatomic, readwrite) NSArray<CSStreamStatistics *> *streams;
 @end
 
@@ -246,6 +253,17 @@ static void cs_apply_video_settings(CSConnection *self, SpiceChannel *channel,
     }
 }
 
+// spice-mac: the CoreAudio backend's "record-enabled" (spice-gtk patch 0013);
+// SPICE thread. Other backends have no such property and keep their behaviour.
+static void cs_apply_microphone_setting(CSConnection *self)
+{
+    SpiceAudio *audio = self.spiceAudio;
+
+    if (audio != NULL && g_object_class_find_property(G_OBJECT_GET_CLASS(audio), "record-enabled")) {
+        g_object_set(audio, "record-enabled", (gboolean)self.microphoneSetting, NULL);
+    }
+}
+
 static void cs_display_channel_event(SpiceChannel *channel, SpiceChannelEvent event,
                                      gpointer data)
 {
@@ -325,6 +343,7 @@ static void cs_channel_new(SpiceSession *s, SpiceChannel *channel, gpointer data
         SPICE_DEBUG("new audio channel");
         if (self.audioEnabled) {
             self.spiceAudio = spice_audio_get(s, [CSMain sharedInstance].glibMainContext);
+            cs_apply_microphone_setting(self);
             spice_channel_connect(channel);
         } else {
             SPICE_DEBUG("audio disabled");
@@ -615,6 +634,21 @@ end:
     [self applyVideoSettingsToOpenDisplaysWithCodecs:NO playout:YES];
 }
 
+- (BOOL)microphoneEnabled {
+    return self.microphoneSetting;
+}
+
+- (void)setMicrophoneEnabled:(BOOL)enabled {
+    self.microphoneSetting = enabled;
+    __weak CSConnection *weakSelf = self;
+    [CSMain.sharedInstance asyncWith:^{
+        CSConnection *strongSelf = weakSelf;
+        if (strongSelf != nil) {
+            cs_apply_microphone_setting(strongSelf);
+        }
+    }];
+}
+
 - (void)applyVideoSettingsToOpenDisplaysWithCodecs:(BOOL)codecs playout:(BOOL)playout {
     __weak CSConnection *weakSelf = self;
     [CSMain.sharedInstance asyncWith:^{
@@ -648,6 +682,7 @@ static NSInteger cs_channel_round_trip_time(SpiceChannel *channel)
 
 - (void)readStatisticsWithCompletion:(void (^)(CSConnectionStatistics *))completion {
     SpiceSession *session = g_object_ref(self.spiceSession);
+    __weak CSConnection *weakSelf = self;
 
     [CSMain.sharedInstance asyncWith:^{
         CSConnectionStatistics *stats = [CSConnectionStatistics new];
@@ -656,6 +691,24 @@ static NSInteger cs_channel_round_trip_time(SpiceChannel *channel)
         GList *channels = spice_session_get_channels(session);
 
         stats.roundTripTime = -1;
+        stats.audioBuffered = stats.audioBufferTarget = stats.audioDeviceLatency = -1;
+        stats.audioUnderruns = stats.audioSkipped = -1;
+        SpiceAudio *audio = weakSelf.spiceAudio;
+        if (audio != NULL && g_object_class_find_property(G_OBJECT_GET_CLASS(audio), "playback-buffer")) {
+            guint buffered = 0, target = 0, latency = 0, underruns = 0, skipped = 0;
+            gboolean recording = FALSE;
+
+            g_object_get(audio, "playback-buffer", &buffered, "playback-target", &target,
+                         "output-latency", &latency,
+                         "playback-underruns", &underruns, "playback-skipped", &skipped,
+                         "recording", &recording, NULL);
+            stats.audioBuffered = buffered;
+            stats.audioBufferTarget = target;
+            stats.audioDeviceLatency = latency;
+            stats.audioUnderruns = underruns;
+            stats.audioSkipped = skipped;
+            stats.guestRecording = recording;
+        }
         for (GList *l = channels; l != NULL; l = l->next) {
             SpiceChannel *channel = l->data;
             gint type = 0;

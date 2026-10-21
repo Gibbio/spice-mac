@@ -68,6 +68,11 @@ enum MainMenu {
         shareClipboard.toolTip = "Share the clipboard with the VM (both directions). "
             + "Takes effect on the next connection. Turn off for untrusted VMs."
         connMenu.addItem(shareClipboard)
+        let shareMicrophone = NSMenuItem(title: "Share Microphone with VM",
+                                         action: #selector(AppDelegate.toggleShareMicrophone(_:)), keyEquivalent: "")
+        shareMicrophone.toolTip = "Let the VM record from the Mac's microphone whenever it wants to. "
+            + "Applies at once. Off, the VM gets no sound when it records."
+        connMenu.addItem(shareMicrophone)
         connMenu.addItem(.separator())
         let preferH264 = NSMenuItem(title: "Prefer H.264 Video",
                                     action: #selector(AppDelegate.togglePreferH264Video(_:)), keyEquivalent: "")

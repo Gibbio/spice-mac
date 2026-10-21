@@ -103,11 +103,14 @@ the server's first MARK) and 0012 (the playout setter and the statistics getters
 - **`Sources/CocoaSpice/include/CSConnection+Streaming.h`** (in the umbrella
   header), implemented in **`CSConnection.m`** — `preferredVideoCodecs` and
   `streamPlayoutDelay`, applied to each display channel when it opens
-  (`cs_display_channel_event`) and at once to the open ones;
+  (`cs_display_channel_event`) and at once to the open ones; `microphoneEnabled`,
+  the CoreAudio backend's `record-enabled` (patch 0013), set when the audio is
+  created (`cs_apply_microphone_setting`) and on every change;
   `-readStatisticsWithCompletion:` collects on the SPICE thread the bytes received
   per channel type, the main channel's TCP round trip (`TCP_CONNECTION_INFO`), TLS
   version and cipher and mouse mode, the playback channel's codec and delay, and
-  every display's stream statistics.
+  every display's stream statistics, and the CoreAudio backend's buffer, device
+  latency, underruns, skipped audio and whether the guest is recording.
 - **`Sources/CocoaSpiceRenderer/CSMetalRenderer.m`** — `collectsPresentStatistics`
   turns the upload-to-screen measurement on without SPICE_DEBUG, and
   `presentedFrameCount` / `missedFrameCount` / `presentLatencySum` expose running

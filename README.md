@@ -23,7 +23,8 @@ UTM uses). Apple-Silicon only.
 > | Keyboard incl. ⌘ / modifiers (self-healing on missed key-up) | ✅ |
 > | Mouse + cursor alignment; optional hide-Mac-cursor | ✅ |
 > | Clipboard (Mac↔VM, both directions) | ✅ |
-> | Audio (guest needs a SPICE audio device) | ✅ |
+> | Audio (guest needs a SPICE audio device) | ✅ native CoreAudio, 60–130 ms |
+> | Microphone (off unless shared) | ✅ |
 > | USB redirection | plumbed |
 
 ## Download
@@ -220,8 +221,9 @@ click reached the client's framebuffer in a median 154 ms, against ~500 ms stock
 behaviour.
 Sounds shorter than a few seconds, such as notifications, leave the video's timing
 alone. Longer ones hand the video back to the server's timing, lined up with the
-audio (about 220 ms after arrival in that test): some 3–4 s into the sound, after
-a single pause of about that length.
+audio: some 3–4 s into the sound, after a single pause of about the audio's delay.
+With the CoreAudio output (below) that is 60–130 ms: a continuous tone in the
+guest had video shown 69 ms after arrival, against 225 ms with GStreamer's.
 
 **Statistics.** **View ▸ Show Statistics** (⌃⌘I) lays a panel over the display,
 refreshed once a second:
@@ -233,11 +235,42 @@ refreshed once a second:
 - **Video:** each stream's codec, decoder (VideoToolbox, built-in MJPEG or
   GStreamer) and size; frames per second received and shown; frames late and
   dropped; how long after arrival frames are shown, and which clock they follow.
-- **Audio:** the codec (Opus or raw), whether it plays, and the output delay.
+- **Audio:** the codec (Opus or raw), whether it plays, the output delay (buffer
+  plus device), underruns and skipped audio; whether the microphone is shared and
+  whether the VM is trying to record.
 
 It answers "is this H.264?" and "is it the network or the server?" at a glance.
 The time from the guest to the client is not in it: the server's timestamps do
 not tell it.
+
+## Audio
+
+Sound plays through CoreAudio directly (a spice-gtk backend of ours, patch 0013),
+not through GStreamer:
+
+- **60–130 ms behind the guest instead of ~220 ms**, from a packet's arrival to
+  the speaker. SpiceMac buffers 40 ms to start with (`SPICE_COREAUDIO_BUFFER_MS`)
+  and tells the server the real delay: what is buffered plus the output device's
+  latency (16 ms in our test).
+- **The buffer adapts to the network.** Audio packets normally arrive every
+  10–17 ms, but on the Mac's Wi-Fi the stream sometimes pauses for up to ~130 ms
+  and then arrives at once (macOS's own Wi-Fi activity, such as AWDL for AirDrop,
+  is the likely cause). So the buffer grows to cover any pause that comes near it,
+  and shrinks by 10 ms after every 5 calm minutes. Over 15 min of continuous sound
+  on Wi-Fi: two dropouts in the first minute, none after, with the delay around
+  120 ms; a fixed 40 ms buffer had 11 dropouts in 18 min. Without such pauses it
+  stays at the 40 ms it starts from, ~60 ms in all. Audio that stays buffered
+  beyond the target for a whole second is skipped, so the delay does not creep up
+  over a long session.
+- **It plays through the system's default output unit**, which moves to whatever
+  output device macOS switches to (headphones, AirPods) on its own.
+- **Microphone: off by default.** A guest can start recording whenever it likes,
+  and nothing would tell you, so **Connection ▸ Share Microphone with VM** has to
+  be turned on first (it applies at once; macOS asks the first time). Off, the VM
+  gets no sound when it records; View ▸ Show Statistics shows when it tries.
+
+`SPICE_AUDIO_BACKEND=gstreamer` at launch brings back the GStreamer output, e.g. to
+compare, without a microphone: GStreamer's would open it whenever the VM records.
 
 ## Verifying the tested components
 

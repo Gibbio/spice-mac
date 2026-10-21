@@ -3,9 +3,10 @@
 //
 // spice-mac fork addition (Apache-2.0, same as CocoaSpice).
 //
-// Video settings an application can change while connected (the preferred
-// codecs, the playout delay) and a statistics snapshot of the connection, on
-// top of spice-gtk patches 0010 and 0012 in spice-mac's deps/patches.
+// Audio and video settings an application can change while connected (the
+// preferred codecs, the playout delay, the microphone) and a statistics
+// snapshot of the connection, on top of spice-gtk patches 0010, 0012 and 0013
+// (the CoreAudio backend) in spice-mac's deps/patches.
 //
 
 #import "CSConnection.h"
@@ -63,8 +64,20 @@ typedef NS_ENUM(NSInteger, CSVideoCodec) {
 @property (nonatomic, readonly) BOOL audioPlaying;
 /// "Opus" or "raw PCM"; nil without a playback channel.
 @property (nonatomic, readonly, copy, nullable) NSString *audioCodec;
-/// The audio output's delay in ms, 0 until known.
+/// The audio output's delay in ms, 0 until known: the audio buffered before
+/// the output device plus the device's own latency.
 @property (nonatomic, readonly) NSInteger audioDelay;
+/// With the CoreAudio backend, -1 otherwise: the audio buffered before the
+/// output device (ms, averaged over a second) and the buffer it aims at (ms,
+/// grows after underruns), the device's latency (ms), how many times the output
+/// ran dry, and how much audio was skipped to keep the delay down (ms).
+@property (nonatomic, readonly) NSInteger audioBuffered;
+@property (nonatomic, readonly) NSInteger audioBufferTarget;
+@property (nonatomic, readonly) NSInteger audioDeviceLatency;
+@property (nonatomic, readonly) NSInteger audioUnderruns;
+@property (nonatomic, readonly) NSInteger audioSkipped;
+/// Whether the guest is recording, whether or not it gets the microphone.
+@property (nonatomic, readonly) BOOL guestRecording;
 /// The video streams of every display.
 @property (nonatomic, readonly) NSArray<CSStreamStatistics *> *streams;
 
@@ -82,6 +95,11 @@ typedef NS_ENUM(NSInteger, CSVideoCodec) {
 /// 0 follows the server's timestamps, a negative value keeps
 /// `SPICE_STREAM_PLAYOUT_MS` (default 50). Applied like `preferredVideoCodecs`.
 @property (atomic) NSInteger streamPlayoutDelay;
+
+/// Whether the guest may record from the Mac's microphone (CoreAudio backend
+/// only). Default NO: the guest can start recording at any time, and gets
+/// nothing while this is off. Applies at once.
+@property (atomic) BOOL microphoneEnabled;
 
 /// Collects the statistics on the SPICE thread and calls `completion` on the
 /// main queue.

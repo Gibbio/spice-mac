@@ -58,6 +58,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         sender.state = Preferences.trashConnectionFileAfterUse ? .on : .off
     }
 
+    @objc func toggleShareMicrophone(_ sender: NSMenuItem) {
+        Preferences.shareMicrophone.toggle()
+    }
+
     // The video settings apply to every open window, which observes
     // .videoSettingsChanged.
     @objc func togglePreferH264Video(_ sender: NSMenuItem) {
@@ -84,6 +88,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             menuItem.state = Preferences.shareClipboard ? .on : .off
         case #selector(toggleTrashConnectionFile(_:)):
             menuItem.state = Preferences.trashConnectionFileAfterUse ? .on : .off
+        case #selector(toggleShareMicrophone(_:)):
+            menuItem.state = Preferences.shareMicrophone ? .on : .off
+            return !Preferences.gstreamerAudio
         case #selector(togglePreferH264Video(_:)):
             menuItem.state = Preferences.preferH264Video ? .on : .off
             return !Preferences.videoCodecsFromEnvironment
@@ -118,6 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let params = try SpiceConnectionParameters(from: config)
             let client = SpiceClient(parameters: params)
             client.shareClipboard = Preferences.shareClipboard
+            client.shareMicrophone = Preferences.shareMicrophone
             let controller = SpiceWindowController(client: client, sourceURL: url)
             controller.onClose = { [weak self, weak controller] in
                 self?.windowControllers.removeAll { $0 === controller }

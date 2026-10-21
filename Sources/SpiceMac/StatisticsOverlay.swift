@@ -59,6 +59,7 @@ struct StatisticsFormatter {
         let present: (presented: Int, missed: Int, latencySum: Double)?
         let guestSize: CGSize
         let agentConnected: Bool
+        let microphoneShared: Bool
     }
 
     private var previous: Sample?
@@ -135,11 +136,30 @@ struct StatisticsFormatter {
         lines.append("Audio")
         if let codec = stats.audioCodec {
             var audio = "  \(codec) · " + (stats.audioPlaying ? "playing" : "idle")
-            if stats.audioPlaying, stats.audioDelay > 0 { audio += " · output delay \(stats.audioDelay) ms" }
+            if stats.audioPlaying, stats.audioDelay > 0 {
+                audio += " · output delay \(stats.audioDelay) ms"
+                if stats.audioBuffered >= 0 {
+                    audio += " (buffer \(stats.audioBuffered) of \(stats.audioBufferTarget)"
+                        + " + device \(stats.audioDeviceLatency))"
+                }
+            }
             lines.append(audio)
+            if stats.audioUnderruns >= 0 {
+                lines.append("  \(stats.audioUnderruns) underruns · \(stats.audioSkipped) ms skipped")
+            }
         } else {
             lines.append("  no audio channel")
         }
+        let microphone: String
+        switch (sample.microphoneShared, stats.guestRecording) {
+        case _ where stats.audioBuffered < 0:
+            microphone = "not available (GStreamer audio)"
+        case (true, true):   microphone = "shared · in use"
+        case (true, false):  microphone = "shared · not in use"
+        case (false, true):  microphone = "not shared · the VM is trying to record"
+        case (false, false): microphone = "not shared"
+        }
+        lines.append("  Microphone  \(microphone)")
         return lines.joined(separator: "\n")
     }
 

@@ -39,6 +39,8 @@
 	<string>12.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>The virtual machine is recording, and Connection ▸ Share Microphone with VM is on.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>UTExportedTypeDeclarations</key>

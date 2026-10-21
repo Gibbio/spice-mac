@@ -10,6 +10,11 @@
     <key>com.apple.security.network.client</key>
     <true/>
 
+    <!-- The guest's recording channel (Connection ▸ Share Microphone with VM).
+         Required under the hardened runtime. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
     <!-- USB redirection (libusb / usbredir). Required under the sandbox. -->
     <key>com.apple.security.device.usb</key>
     <true/>

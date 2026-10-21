@@ -25,6 +25,7 @@ UTM uses). Apple-Silicon only.
 > | Clipboard (Mac↔VM, both directions) | ✅ |
 > | Audio (guest needs a SPICE audio device) | ✅ native CoreAudio, 60–130 ms |
 > | Microphone (off unless shared) | ✅ |
+> | Copy files into the VM (drag and drop) | ✅ |
 > | USB redirection | plumbed |
 
 ## Download
@@ -268,6 +269,21 @@ Sound plays through CoreAudio directly (a spice-gtk backend of ours, patch 0013)
   and nothing would tell you, so **Connection ▸ Share Microphone with VM** has to
   be turned on first (it applies at once; macOS asks the first time). Off, the VM
   gets no sound when it records; View ▸ Show Statistics shows when it tries.
+
+## Copying files into the VM
+
+Drag files from the Finder onto the window: the guest's SPICE agent saves them
+(spice-vdagent on Windows puts them on the Desktop). A bar at the top of the display
+shows what is being copied, how much is done, the speed and the time left, with a
+button to stop; then how it went. Folders are not copied (the agent protocol carries
+files only): drop the files in them, or a `.zip`.
+
+It needs the guest agent, and with a stock spice-server it is slow: the agent
+protocol carries 2 KB per message and the server lets 10 of them travel at a time,
+so it runs at about 1 MB/s (20 MB in 19 s in our test, the file arriving intact),
+whatever the network. Raising that window on the node made it ~10× faster (200 MB
+in 19 s): see [docs/server-side-video.md](docs/server-side-video.md) ▸ *Faster file
+copies*.
 
 ## Verifying the tested components
 

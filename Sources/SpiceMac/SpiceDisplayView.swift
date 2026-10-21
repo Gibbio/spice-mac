@@ -80,6 +80,7 @@ final class SpiceDisplayView: MTKView {
         preferredFramesPerSecond = 120
         wantsLayer = true
         layer?.isOpaque = true
+        registerForDraggedTypes([.fileURL])
 
         hideCursorPrefObserver = NotificationCenter.default.addObserver(
             forName: .hideHostCursorChanged, object: nil, queue: .main) { [weak self] _ in
@@ -329,6 +330,36 @@ final class SpiceDisplayView: MTKView {
     override func rightMouseDragged(with event: NSEvent) { router.mouseMoved(event, in: self) }
     override func otherMouseDragged(with event: NSEvent) { router.mouseMoved(event, in: self) }
     override func scrollWheel(with event: NSEvent) { router.scrollWheel(event) }
+
+    // MARK: - Dropping files (copied into the guest by the window controller)
+
+    /// Files dropped on the display.
+    var onFilesDropped: (([URL]) -> Void)?
+    /// A drag of files enters (true) or leaves (false) the display.
+    var onFileDragChanged: ((Bool) -> Void)?
+
+    private func draggedFiles(_ info: NSDraggingInfo) -> [URL] {
+        info.draggingPasteboard.readObjects(forClasses: [NSURL.self],
+                                            options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard attachedDisplay != nil, !draggedFiles(sender).isEmpty else { return [] }
+        onFileDragChanged?(true)
+        return .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        onFileDragChanged?(false)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let files = draggedFiles(sender)
+        onFileDragChanged?(false)
+        guard attachedDisplay != nil, !files.isEmpty else { return false }
+        onFilesDropped?(files)
+        return true
+    }
 
     // Deliver mouseMoved while the window is key.
     override func updateTrackingAreas() {

@@ -17,6 +17,7 @@
 #import "CocoaSpice.h"
 #import "CSConnection+Proxmox.h" // spice-mac fork addition
 #import "CSConnection+Streaming.h" // spice-mac fork addition
+#import "CSConnection+FileTransfer.h" // spice-mac fork addition
 #import "CSChannel+Protected.h"
 #import "CSCursor+Protected.h"
 #import "CSDisplay+Protected.h"
@@ -85,6 +86,44 @@
 @end
 
 @implementation CSConnectionStatistics
+@end
+
+// spice-mac fork addition: see CSConnection+FileTransfer.h
+@implementation CSFileTransfer {
+    GCancellable *_cancellable;
+}
+
+- (instancetype)init {
+    if (self = [super init]) {
+        _cancellable = g_cancellable_new();
+    }
+    return self;
+}
+
+- (void)dealloc {
+    g_object_unref(_cancellable);
+}
+
+- (GCancellable *)cancellable {
+    return _cancellable;
+}
+
+- (void)cancel {
+    g_cancellable_cancel(_cancellable);   // thread-safe
+}
+
+@end
+
+/// The blocks of one copy, owned by spice-gtk's callbacks until it completes
+@interface CSFileTransferCallbacks : NSObject
+@property (nonatomic, copy) void (^progress)(int64_t sent, int64_t total);
+@property (nonatomic, copy) void (^completion)(NSError * _Nullable error);
+/// The first file's own error (SPICE thread): the copy's only says "Transferring
+/// 1 files: 0 succeed, 0 cancelled, 1 failed"
+@property (nonatomic, copy, nullable) NSString *fileError;
+@end
+
+@implementation CSFileTransferCallbacks
 @end
 
 @implementation CSConnection
@@ -766,6 +805,135 @@ static NSInteger cs_channel_round_trip_time(SpiceChannel *channel)
             completion(stats);
         });
     }];
+}
+
+#pragma mark - File transfer (spice-mac fork addition)
+
+/* SPICE thread */
+static void cs_file_transfer_progress(goffset sent, goffset total, gpointer data)
+{
+    CSFileTransferCallbacks *callbacks = (__bridge CSFileTransferCallbacks *)data;
+    void (^progress)(int64_t, int64_t) = callbacks.progress;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        progress(sent, total);
+    });
+}
+
+/* SPICE thread: a file of a copy ended */
+static void cs_file_transfer_task_finished(SpiceFileTransferTask *task, GError *error, gpointer data)
+{
+    CSFileTransferCallbacks *callbacks = (__bridge CSFileTransferCallbacks *)data;
+
+    if (error != NULL && callbacks.fileError == nil && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+        callbacks.fileError = @(error->message);
+    }
+}
+
+static void cs_file_transfer_release(gpointer data, GClosure *closure)
+{
+    CFBridgingRelease(data);
+}
+
+/* SPICE thread: spice-gtk announces each file of a copy, from within
+ * spice_main_channel_file_copy_async() */
+static void cs_file_transfer_new(SpiceMainChannel *main, SpiceFileTransferTask *task, gpointer data)
+{
+    g_signal_connect_data(task, "finished", G_CALLBACK(cs_file_transfer_task_finished),
+                          (void *)CFBridgingRetain((__bridge id)data), cs_file_transfer_release, 0);
+}
+
+static void cs_file_transfer_release_report(gpointer data)
+{
+    CFRelease(data);
+}
+
+static gboolean cs_file_transfer_report(gpointer data)
+{
+    dispatch_block_t report = (__bridge dispatch_block_t)data;
+
+    report();
+    return G_SOURCE_REMOVE;
+}
+
+/* SPICE thread; called once, after the last progress */
+static void cs_file_transfer_done(GObject *source, GAsyncResult *result, gpointer data)
+{
+    CSFileTransferCallbacks *callbacks = (__bridge_transfer CSFileTransferCallbacks *)data;
+    GError *err = NULL;
+    BOOL ok = spice_main_channel_file_copy_finish(SPICE_MAIN_CHANNEL(source), result, &err);
+    BOOL cancelled = !ok && g_error_matches(err, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+    NSString *message = ok ? nil : (err != NULL ? @(err->message) : @"The file transfer failed.");
+    gint code = err != NULL ? err->code : 0;
+
+    g_clear_error(&err);
+    // The files' own "finished" handlers can run right after this, in the same
+    // signal emission: report from the next main-context iteration.
+    dispatch_block_t report = ^{
+        NSError *error = nil;
+        if (cancelled) {
+            error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSUserCancelledError userInfo:nil];
+        } else if (message != nil) {
+            error = [NSError errorWithDomain:@"CSFileTransfer" code:code
+                                    userInfo:@{NSLocalizedDescriptionKey: callbacks.fileError ?: message}];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            callbacks.completion(error);
+        });
+    };
+    GSource *idle = g_idle_source_new();
+    g_source_set_callback(idle, cs_file_transfer_report, (void *)CFBridgingRetain(report),
+                          cs_file_transfer_release_report);
+    g_source_attach(idle, CSMain.sharedInstance.glibMainContext);
+    g_source_unref(idle);
+}
+
+- (CSFileTransfer *)copyFilesToGuest:(NSArray<NSURL *> *)files
+                            progress:(void (^)(int64_t, int64_t))progress
+                          completion:(void (^)(NSError *))completion {
+    CSFileTransfer *transfer = [CSFileTransfer new];
+    CSFileTransferCallbacks *callbacks = [CSFileTransferCallbacks new];
+    GCancellable *cancellable = g_object_ref([transfer cancellable]);
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    __weak CSConnection *weakSelf = self;
+
+    callbacks.progress = progress;
+    callbacks.completion = completion;
+    for (NSURL *file in files) {
+        if (file.isFileURL) {
+            [paths addObject:file.path];
+        }
+    }
+    [CSMain.sharedInstance asyncWith:^{
+        SpiceMainChannel *main = weakSelf.spiceMain;
+
+        if (main == NULL || paths.count == 0) {
+            NSString *message = main == NULL ? @"Not connected." : @"There is no file to copy.";
+            NSError *error = [NSError errorWithDomain:@"CSFileTransfer" code:0
+                                             userInfo:@{NSLocalizedDescriptionKey: message}];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(error);
+            });
+            g_object_unref(cancellable);
+            return;
+        }
+        GFile **sources = g_new0(GFile *, paths.count + 1);
+        for (NSUInteger i = 0; i < paths.count; i++) {
+            sources[i] = g_file_new_for_path(paths[i].fileSystemRepresentation);
+        }
+        void *data = (__bridge_retained void *)callbacks;
+        gulong announced = g_signal_connect(main, "new-file-transfer", G_CALLBACK(cs_file_transfer_new), data);
+        spice_main_channel_file_copy_async(main, sources, G_FILE_COPY_NONE, cancellable,
+                                           cs_file_transfer_progress, data,
+                                           cs_file_transfer_done, data);
+        g_signal_handler_disconnect(main, announced);
+        for (NSUInteger i = 0; i < paths.count; i++) {
+            g_object_unref(sources[i]);   // the transfer tasks hold their own
+        }
+        g_free(sources);
+        g_object_unref(cancellable);
+    }];
+    return transfer;
 }
 
 @end

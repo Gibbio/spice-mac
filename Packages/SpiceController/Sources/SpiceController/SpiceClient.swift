@@ -184,6 +184,16 @@ public final class SpiceClient: NSObject, ObservableObject {
         connection?.readStatistics(completion: completion)
     }
 
+    /// Copies files (not folders) into the guest through its agent. `progress`
+    /// gets the bytes sent and the total, `completion` the error if any (an
+    /// `NSUserCancelledError` after `cancel()`); both on the main queue. Nil when
+    /// not connected.
+    public func copyFilesToGuest(_ files: [URL],
+                                 progress: @escaping (Int64, Int64) -> Void,
+                                 completion: @escaping (Error?) -> Void) -> CSFileTransfer? {
+        connection?.copyFiles(toGuest: files, progress: progress, completion: completion)
+    }
+
     /// Request disconnect. Final teardown is reported via `spiceDisconnected:`.
     public func disconnect() {
         onMain { self.connection?.disconnect() }

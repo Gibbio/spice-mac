@@ -23,6 +23,14 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
     private var statisticsFormatter = StatisticsFormatter()
     private var isConnected = false
 
+    /// Files dropped on the display are copied into the guest; the bar at the top
+    /// shows how far along.
+    private let transferBar = FileTransferBarView()
+    private var transfers: [ObjectIdentifier: CSFileTransfer] = [:]
+    private var transferProgress = FileTransferProgress()
+    private var transferTimer: Timer?
+    private var transferBarHide: DispatchWorkItem?
+
     /// Called when the window closes so the app can drop its reference.
     var onClose: (() -> Void)?
 
@@ -103,6 +111,22 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
         statisticsOverlay.autoresizingMask = [.maxXMargin, .minYMargin]   // stays top-left
         statisticsOverlay.isHidden = true
         containerView.addSubview(statisticsOverlay)
+
+        transferBar.isHidden = true
+        transferBar.translatesAutoresizingMaskIntoConstraints = false
+        transferBar.onCancel = { [weak self] in self?.stopFileTransfers() }
+        containerView.addSubview(transferBar)
+        let barWidth = transferBar.widthAnchor.constraint(equalToConstant: 520)
+        barWidth.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            transferBar.topAnchor.constraint(equalTo: containerView.topAnchor, constant: 12),
+            transferBar.centerXAnchor.constraint(equalTo: containerView.centerXAnchor),
+            transferBar.widthAnchor.constraint(lessThanOrEqualTo: containerView.widthAnchor, constant: -24),
+            barWidth,
+        ])
+        displayView.onFileDragChanged = { [weak self] dragging in self?.fileDragChanged(dragging) }
+        displayView.onFilesDropped = { [weak self] files in self?.copyIntoGuest(files) }
+
         NSLayoutConstraint.activate([
             statusLabel.centerXAnchor.constraint(equalTo: containerView.centerXAnchor),
             statusLabel.centerYAnchor.constraint(equalTo: containerView.centerYAnchor),
@@ -453,12 +477,92 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
         pendingResolutionRequest = nil
         statisticsTimer?.invalidate()
         statisticsTimer = nil
+        stopFileTransfers()
+        transferTimer?.invalidate()
+        transferTimer = nil
         for observer in notificationObservers { NotificationCenter.default.removeObserver(observer) }
         notificationObservers.removeAll()
         displayView.router.releaseAll()
         client.disconnect()
         displayView.detach()
         onClose?()
+    }
+
+    // MARK: - Copying files into the guest
+
+    private func fileDragChanged(_ dragging: Bool) {
+        guard !transferProgress.isActive else { return }   // the bar shows the copy
+        if dragging {
+            transferBarHide?.cancel()
+            transferBar.show(.dragging)
+        } else if transferBarHide == nil {
+            transferBar.isHidden = true
+        }
+    }
+
+    private func copyIntoGuest(_ urls: [URL]) {
+        let isFolder = { (url: URL) in (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
+        let files = urls.filter { !isFolder($0) }
+        let folders = urls.count - files.count
+        guard !files.isEmpty else {
+            showTransferOutcome("Folders cannot be copied: drop the files in them, or a .zip of the folder",
+                                failed: true)
+            return
+        }
+        var id: ObjectIdentifier?
+        let transfer = client.copyFilesToGuest(files, progress: { [weak self] sent, total in
+            guard let self, let id else { return }
+            self.transferProgress.update(id, sent: sent, total: total, now: CACurrentMediaTime())
+        }, completion: { [weak self] error in
+            guard let self, let id else { return }
+            self.transfers[id] = nil
+            self.transferProgress.finish(id, error: error)
+            if !self.transferProgress.isActive {
+                self.transferTimer?.invalidate()
+                self.transferTimer = nil
+                let outcome = self.transferProgress.outcome
+                self.showTransferOutcome(outcome.text, failed: outcome.failed)
+            }
+        })
+        guard let transfer else {
+            showTransferOutcome("Not connected", failed: true)
+            return
+        }
+        id = ObjectIdentifier(transfer)
+        transfers[ObjectIdentifier(transfer)] = transfer
+        transferProgress.start(ObjectIdentifier(transfer), files: files, foldersSkipped: folders)
+        transferBarHide?.cancel()
+        transferBarHide = nil
+        refreshTransferBar()
+        if transferTimer == nil {
+            // .common, so it keeps ticking during live resize and menu tracking.
+            let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.refreshTransferBar() }
+            RunLoop.main.add(timer, forMode: .common)
+            transferTimer = timer
+        }
+    }
+
+    private func refreshTransferBar() {
+        guard transferProgress.isActive else { return }
+        let status = transferProgress.status(now: CACurrentMediaTime())
+        transferBar.show(.copying(status.text, fraction: status.fraction))
+    }
+
+    private func stopFileTransfers() {
+        for transfer in transfers.values { transfer.cancel() }
+    }
+
+    /// Shows how a copy ended for a few seconds (longer for an error).
+    private func showTransferOutcome(_ text: String, failed: Bool) {
+        transferBar.show(failed ? .failed(text) : .finished(text))
+        transferBarHide?.cancel()
+        let hide = DispatchWorkItem { [weak self] in
+            guard let self, !self.transferProgress.isActive else { return }
+            self.transferBar.isHidden = true
+            self.transferBarHide = nil
+        }
+        transferBarHide = hide
+        DispatchQueue.main.asyncAfter(deadline: .now() + (failed ? 8 : 4), execute: hide)
     }
 
     // MARK: - Connection actions (responder chain targets)

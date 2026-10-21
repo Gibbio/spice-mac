@@ -164,6 +164,45 @@ x264 and ~0.4 ms with Quick Sync.
 One drawback: starting a VA pipeline takes time, so the picture pauses for about
 0.3 s each time the server creates a stream (when a video starts or moves).
 
+## Faster file copies
+
+Files dropped on SpiceMac's window travel to the guest's agent in SPICE messages of
+at most 2 KB. The server lets the client send 10 of them before it returns tokens,
+5 at a time, once the agent's virtio-serial port has taken them: 20 KB per round
+trip, ~1 MB/s. Both numbers date from the first public commit of the SPICE code
+(2009), when the agent only carried mouse, clipboard and display settings; file
+transfer came later and they were never revisited.
+
+With the window at 64 and tokens returned 16 at a time (a patch in our package's
+`debian/patches/`):
+
+| File | Stock (10/5) | 64/16 |
+|---|---|---|
+| 20 MB | 18.7 s (1.1 MB/s) | 1.5 s (13 MB/s) |
+| 200 MB | — | 18.8 s (10.6 MB/s) |
+
+Both copies arrived intact (same SHA-256). The token accounting is the part of
+spice-server that had bugs before (a crash and a client/server token mismatch, fixed
+in 2016), so with 64/16 we also tried: cancelling a 100 MB copy halfway, then
+copying another file; and restarting the guest's `spice-agent` service in the middle
+of a 400 MB copy, then copying again. Each time the interrupted copy ended cleanly
+(no partial file left in the guest), the client stayed connected, the agent came
+back within 0.3 s and the next copy arrived intact. The server's receive buffer per
+client grows from ~26 KB to ~137 KB. Not tried: live migration between nodes whose
+spice-server use different windows (Proxmox migrates SPICE sessions seamlessly);
+keep the nodes of a cluster on the same package.
+
+```diff
+--- a/server/main-channel.h
++++ b/server/main-channel.h
+-#define REDS_AGENT_WINDOW_SIZE 10
++#define REDS_AGENT_WINDOW_SIZE 64
+--- a/server/reds.cpp
++++ b/server/reds.cpp
+-#define REDS_TOKENS_TO_SEND 5
++#define REDS_TOKENS_TO_SEND 16
+```
+
 ## Going back
 
 ```sh

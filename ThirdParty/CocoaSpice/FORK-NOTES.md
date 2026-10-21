@@ -116,6 +116,17 @@ the server's first MARK) and 0012 (the playout setter and the statistics getters
   `presentedFrameCount` / `missedFrameCount` / `presentLatencySum` expose running
   totals; the once-a-second log stays SPICE_DEBUG only.
 
+## File transfer (spice-mac addition)
+
+- **`Sources/CocoaSpice/include/CSConnection+FileTransfer.h`** (in the umbrella
+  header), implemented in **`CSConnection.m`** —
+  `-copyFilesToGuest:progress:completion:` wraps spice-gtk's
+  `spice_main_channel_file_copy_async()` on the SPICE thread and calls back on the
+  main queue; the `CSFileTransfer` it returns cancels the copy (`GCancellable`).
+  A failed copy reports the file's own error (from each spice-gtk task's
+  `finished` signal): the call's error is only a count of failed files.
+  SpiceMac's drag and drop uses it.
+
 ## Build integration (spice-mac additions)
 
 - **`Package.swift`** — compiles against the headers `scripts/build-deps.sh` installs

@@ -21,6 +21,7 @@
 #include "CSConnection.h"
 #include "CSConnection+Proxmox.h" // spice-mac fork addition
 #include "CSConnection+Streaming.h" // spice-mac fork addition
+#include "CSConnection+FileTransfer.h" // spice-mac fork addition
 #include "CSConnectionDelegate.h"
 #include "CSCursor.h"
 #include "CSDisplay.h"

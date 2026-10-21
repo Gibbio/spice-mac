@@ -44,6 +44,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   none after (a fixed buffer: 11 in 18 min).
 - **Connection ▸ Share Microphone with VM**, off by default: until it is on, a VM
   that records gets no sound, and SpiceMac never opens the Mac's microphone.
+- **Drag files onto the window to copy them into the VM**, through its SPICE
+  agent (spice-vdagent on Windows saves them on the Desktop). A bar at the top of
+  the display shows the progress, the speed and the time left, with a button to
+  stop. About 1 MB/s with a stock spice-server (2 KB messages, 10 in flight); with
+  the window raised on the node, ~10 MB/s (docs/server-side-video.md).
 - **View ▸ Show Statistics** (⌃⌘I): a panel over the display with bandwidth by
   channel, TCP round trip, TLS, the Mac's frame rate and upload-to-screen time,
   each video stream's codec, decoder, frame rates, late and dropped frames and

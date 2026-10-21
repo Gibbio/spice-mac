@@ -277,7 +277,10 @@ Drag files from the Finder onto the window: the guest's SPICE agent saves them
 (spice-vdagent on Windows puts them on the Desktop). A bar at the top of the display
 shows what is being copied, how much is done, the speed and the time left, with a
 button to stop; then how it went. Folders are not copied (the agent protocol carries
-files only): drop the files in them, or a `.zip`.
+files only): drop the files in them, or a `.zip`. Nothing in the guest is
+overwritten: when the name is taken, spice-vdagent saves the copy as `name (1).ext`,
+`name (2).ext`… The protocol cannot ask whether a file exists, nor say under which
+name it was saved, so SpiceMac cannot ask before or tell after.
 
 It needs the guest agent, and with a stock spice-server it is slow: the agent
 protocol carries 2 KB per message and the server lets 10 of them travel at a time,

@@ -150,6 +150,7 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
             barWidth,
         ])
         displayView.onFileDragChanged = { [weak self] dragging in self?.fileDragChanged(dragging) }
+        displayView.displayViewAtScreenPoint = { [weak self] point in self?.sessionDisplayView(at: point) }
         displayView.onFilesDropped = { [weak self] files in self?.copyIntoGuest(files) }
 
         NSLayoutConstraint.activate([
@@ -351,6 +352,19 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
         }
         displayWindows[id] = controller
         return controller
+    }
+
+    /// The display view of this session at a screen point, for drags from one
+    /// display's window into another's.
+    private func sessionDisplayView(at screenPoint: NSPoint) -> SpiceDisplayView? {
+        let session = sessionWindow ?? self
+        let number = NSWindow.windowNumber(at: screenPoint, belowWindowWithWindowNumber: 0)
+        let controllers = [session] + Array(session.displayWindows.values)
+        guard let controller = controllers.first(where: { $0.window?.windowNumber == number }),
+              let window = controller.window else { return nil }
+        let view = controller.displayView
+        let local = view.convert(window.convertPoint(fromScreen: screenPoint), from: nil)
+        return view.bounds.contains(local) ? view : nil
     }
 
     private func closeDisplayWindows() {

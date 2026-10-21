@@ -298,7 +298,9 @@ screens without a SpiceMac window, cascaded otherwise. Each window has its own
 size, zoom and full screen, and the guest follows each window's size; in the guest
 the displays sit side by side, left to right in order. The pointer goes to the
 display under it; the keyboard to whichever window is in front. A `.vv` that asks
-for full screen puts every window in full screen. View ▸ Displays lists the
+for full screen puts every window in full screen. A drag that starts on one
+display continues on another display's window, so a guest window can be dragged
+across, as with two monitors. View ▸ Displays lists the
 displays: one that is off can be turned on there (it needs the guest agent), at
 the main window's size.
 

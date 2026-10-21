@@ -341,9 +341,24 @@ final class SpiceDisplayView: MTKView {
         updateHostCursorVisibility()
         router.mouseMoved(event, in: self)
     }
-    override func mouseDragged(with event: NSEvent) { router.mouseMoved(event, in: self) }
-    override func rightMouseDragged(with event: NSEvent) { router.mouseMoved(event, in: self) }
-    override func otherMouseDragged(with event: NSEvent) { router.mouseMoved(event, in: self) }
+    override func mouseDragged(with event: NSEvent) { dragged(event) }
+    override func rightMouseDragged(with event: NSEvent) { dragged(event) }
+    override func otherMouseDragged(with event: NSEvent) { dragged(event) }
+
+    /// The view of another display of the same session under a screen point, if
+    /// any; set by the window controller.
+    var displayViewAtScreenPoint: ((NSPoint) -> SpiceDisplayView?)?
+
+    /// AppKit sends a whole drag to the view it started in; over another
+    /// display's window, the pointer goes to that display instead.
+    private func dragged(_ event: NSEvent) {
+        if let screenPoint = window?.convertPoint(toScreen: event.locationInWindow),
+           let other = displayViewAtScreenPoint?(screenPoint), other !== self {
+            router.mouseDragged(event, over: other.router, in: other)
+        } else {
+            router.mouseMoved(event, in: self)
+        }
+    }
     override func scrollWheel(with event: NSEvent) { router.scrollWheel(event) }
 
     // MARK: - Dropping files (copied into the guest by the window controller)

@@ -54,7 +54,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   full screen; the pointer goes to the display under it. View ▸ Displays shows a
   hidden window or turns an off display on. Closing a display window other than
   the first hides it: turning the display off would leave spice-vdagent-win
-  unable to set any resolution until the guest restarts.
+  unable to set any resolution until the guest restarts. A drag that starts on
+  one display continues on the other's window, so guest windows move across
+  displays as with two monitors.
 - **View ▸ Show Statistics** (⌃⌘I): a panel over the display with bandwidth by
   channel, TCP round trip, TLS, the Mac's frame rate and upload-to-screen time,
   each video stream's codec, decoder, frame rates, late and dropped frames and

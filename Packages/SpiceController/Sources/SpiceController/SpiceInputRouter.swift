@@ -177,6 +177,21 @@ public final class SpiceInputRouter {
         }
     }
 
+    /// A drag that started on this router's display, now over the view of another
+    /// display of the same session: put the pointer on that display with this
+    /// drag's buttons still down, so a guest window dragged across follows it, as
+    /// with two monitors. The buttons stay with this router: AppKit sends the
+    /// release to the view the drag started in.
+    public func mouseDragged(_ event: NSEvent, over other: SpiceInputRouter, in otherView: NSView) {
+        guard let input, !input.serverModeCursor,
+              let screenPoint = event.window?.convertPoint(toScreen: event.locationInWindow),
+              let otherWindow = otherView.window else { return }
+        let local = otherView.convert(otherWindow.convertPoint(fromScreen: screenPoint), from: nil)
+        let p = other.absolutePoint(local: local, in: otherView)
+        input.sendMousePosition(buttonMask, absolutePoint: p, forMonitorID: other.monitorID)
+        other.cursorMover?(p)
+    }
+
     public func scrollWheel(_ event: NSEvent) {
         guard let input else { return }
         // AppKit's scrollingDeltaY is how far the CONTENT moves — positive means
@@ -209,8 +224,11 @@ public final class SpiceInputRouter {
     /// under the macOS pointer (used for both sendMousePosition and cursor.move).
     private func absolutePoint(_ event: NSEvent, in view: NSView) -> CGPoint {
         // AppKit point: window coords, bottom-left origin, in POINTS.
-        let local = view.convert(event.locationInWindow, from: nil)
+        absolutePoint(local: view.convert(event.locationInWindow, from: nil), in: view)
+    }
 
+    /// The same for a point already in `view`'s coordinates.
+    private func absolutePoint(local: CGPoint, in view: NSView) -> CGPoint {
         if let info = viewportInfoProvider?(), info.guestSize.width > 0,
            info.guestSize.height > 0, info.scale > 0 {
             let W = info.guestSize.width, H = info.guestSize.height

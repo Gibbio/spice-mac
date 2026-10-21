@@ -38,9 +38,6 @@ for tool in meson ninja cmake pkg-config; do
     if command -v "$tool" >/dev/null 2>&1; then pass "$tool present"
     else fail "$tool not found" "brew install $tool"; fi
 done
-# macOS ships bison 2.3; GStreamer needs >= 2.4 (Homebrew's is keg-only).
-if [ -x "$(brew --prefix bison 2>/dev/null)/bin/bison" ]; then pass "bison (Homebrew) present"
-else fail "bison >= 2.4 not found" "brew install bison"; fi
 
 # 6. Native SPICE stack — a build step, not a prerequisite (make all builds it)
 if [ -f "$ROOT/Sysroot/lib/libspice-client-glib-2.0.dylib" ]; then

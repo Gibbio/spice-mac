@@ -90,7 +90,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             menuItem.state = Preferences.trashConnectionFileAfterUse ? .on : .off
         case #selector(toggleShareMicrophone(_:)):
             menuItem.state = Preferences.shareMicrophone ? .on : .off
-            return !Preferences.gstreamerAudio
         case #selector(togglePreferH264Video(_:)):
             menuItem.state = Preferences.preferH264Video ? .on : .off
             return !Preferences.videoCodecsFromEnvironment

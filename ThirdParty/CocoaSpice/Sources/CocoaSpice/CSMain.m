@@ -18,7 +18,6 @@
 #import <glib.h>
 #import <spice-client.h>
 #import <pthread.h>
-#import "gst_ios_init.h"
 
 @interface CSMain ()
 
@@ -91,7 +90,6 @@ void *spice_main_loop(void *args) {
     CSMain *self = (__bridge_transfer CSMain *)args;
     
     pthread_setname_np("SPICE Main Loop");
-    gst_ios_init();
     
     g_main_context_ref(self->_main_context);
     g_main_context_push_thread_default(self->_main_context);

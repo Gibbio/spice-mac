@@ -29,7 +29,7 @@ make test     # the dependency-free runners: vvcheck (.vv parser), inputcheck (k
 
 The full app needs **Xcode** + the **Metal toolchain component**
 (`xcodebuild -downloadComponent MetalToolchain`) + the build tools for the native
-SPICE stack (`brew install meson ninja cmake pkg-config bison`):
+SPICE stack (`brew install meson ninja cmake pkg-config`):
 
 ```sh
 make doctor   # checks the above and prints fixes if anything's missing

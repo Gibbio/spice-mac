@@ -88,7 +88,7 @@ CocoaSpice (forked, Obj-C)        ThirdParty/CocoaSpice   ← Proxmox patch
         │   Metal renderer, channels, USB, clipboard over spice-client-glib
         ▼
 Native SPICE stack (arm64)        Sysroot/  (built from source by scripts/build-deps.sh)
-        spice-client-glib, glib, gstreamer, libusb, usbredir, openssl, …
+        spice-client-glib, glib, libusb, usbredir, openssl, …
 
 Pure-Swift, independently testable:
   VVConfig        Packages/VVConfig       — virt-viewer .vv parser (+ Proxmox)
@@ -109,7 +109,7 @@ adds exactly one method, `-[CSConnection setProxy:ca:certSubject:]`
 - The **Metal toolchain component** — on Xcode 26 it is a separate download:
   `xcodebuild -downloadComponent MetalToolchain`. Needed because SwiftPM does not
   compile `.metal` resources; `build-app.sh` compiles the shader into the bundle.
-- Homebrew build tools: `brew install meson ninja cmake pkg-config bison` (see *Dependencies*).
+- Homebrew build tools: `brew install meson ninja cmake pkg-config` (see *Dependencies*).
 
 ## Build
 
@@ -140,14 +140,14 @@ open build/SpiceMac.app
 
 ### Dependencies
 
-CocoaSpice does **not** bundle the native libraries it links (glib, gstreamer,
+CocoaSpice does **not** bundle the native libraries it links (glib,
 spice-client-glib, libusb, …). `scripts/build-deps.sh` builds them from upstream
 sources into `Sysroot/` (arm64, macOS 12+, every library `@rpath`-relative):
 
 - **Pinned and fail-closed.** `deps/sources.lock` fixes each package's version, URL
   and SHA-256; a mismatch aborts the build. Meson may not fetch subprojects on its
   own, and nothing may be found or linked from `/opt/homebrew` — Homebrew's meson,
-  ninja, cmake, pkg-config and bison are used only as tools. A final check rejects
+  ninja, cmake and pkg-config are used only as tools. A final check rejects
   any library that references a path outside `@rpath` or the OS.
 - **Patched where needed.** `deps/patches/<package>/` holds the patches applied on
   top of upstream. For spice-gtk: UTM's GMainContext support (CocoaSpice relies on
@@ -223,7 +223,8 @@ Sounds shorter than a few seconds, such as notifications, leave the video's timi
 alone. Longer ones hand the video back to the server's timing, lined up with the
 audio: some 3–4 s into the sound, after a single pause of about the audio's delay.
 With the CoreAudio output (below) that is 60–130 ms: a continuous tone in the
-guest had video shown 69 ms after arrival, against 225 ms with GStreamer's.
+guest had video shown 69 ms after arrival, against 225 ms with the GStreamer output
+SpiceMac used before.
 
 **Statistics.** **View ▸ Show Statistics** (⌃⌘I) lays a panel over the display,
 refreshed once a second:
@@ -232,8 +233,8 @@ refreshed once a second:
   the node's spiceproxy); the TLS version and cipher.
 - **Display:** the guest resolution, mouse mode and agent; how many frames the
   Mac draws per second and how long an uploaded frame takes to reach the screen.
-- **Video:** each stream's codec, decoder (VideoToolbox, built-in MJPEG or
-  GStreamer) and size; frames per second received and shown; frames late and
+- **Video:** each stream's codec, decoder (VideoToolbox or the built-in MJPEG one)
+  and size; frames per second received and shown; frames late and
   dropped; how long after arrival frames are shown, and which clock they follow.
 - **Audio:** the codec (Opus or raw), whether it plays, the output delay (buffer
   plus device), underruns and skipped audio; whether the microphone is shared and
@@ -245,8 +246,7 @@ not tell it.
 
 ## Audio
 
-Sound plays through CoreAudio directly (a spice-gtk backend of ours, patch 0013),
-not through GStreamer:
+Sound plays through CoreAudio directly (a spice-gtk backend of ours, patch 0013):
 
 - **60–130 ms behind the guest instead of ~220 ms**, from a packet's arrival to
   the speaker. SpiceMac buffers 40 ms to start with (`SPICE_COREAUDIO_BUFFER_MS`)
@@ -268,9 +268,6 @@ not through GStreamer:
   and nothing would tell you, so **Connection ▸ Share Microphone with VM** has to
   be turned on first (it applies at once; macOS asks the first time). Off, the VM
   gets no sound when it records; View ▸ Show Statistics shows when it tries.
-
-`SPICE_AUDIO_BACKEND=gstreamer` at launch brings back the GStreamer output, e.g. to
-compare, without a microphone: GStreamer's would open it whenever the VM records.
 
 ## Verifying the tested components
 
@@ -301,7 +298,7 @@ glib/spice headers (`clang -fsyntax-only`, exit 0).
 - **`pveproxy` gating.** `/etc/default/pveproxy` `ALLOW_FROM`/cipher rules can
   reset port 3128 even with a valid ticket.
 - **Dep ages.** Every native library is built from a current upstream release pinned
-  in `deps/sources.lock` (spice-gtk 0.43, glib 2.88, GStreamer 1.28, OpenSSL 3.5 LTS);
+  in `deps/sources.lock` (spice-gtk 0.43, glib 2.88, OpenSSL 3.5 LTS);
   bump them there.
 
 ## Display zoom (Retina)
@@ -369,7 +366,7 @@ many JTAG/printer dongles) redirect **without root** — check with
 See [SECURITY.md](SECURITY.md). In short: the app code is sound (no RCE/memory-
 corruption; TLS fails closed). The server-exposed native libraries are current —
 every native library is built from a pinned, current upstream release (**spice-gtk
-0.43**, **OpenSSL 3.5 LTS** (to 2030), glib 2.88, GStreamer 1.28 — see
+0.43**, **OpenSSL 3.5 LTS** (to 2030), glib 2.88 — see
 `deps/sources.lock`). Clipboard sharing is on by default (toggle in the Connection menu),
 and `run-as-root.sh` runs the whole parser surface as root — fine for personal use
 against trusted VMs.
@@ -390,13 +387,12 @@ building from source, and rebuilding to verify a download, will always stay free
 - `ThirdParty/CocoaSpice`: **Apache-2.0** (vendored fork; `LICENSE` retained, changes in
   [FORK-NOTES.md](ThirdParty/CocoaSpice/FORK-NOTES.md)).
 - The native SPICE stack (built from source at build time, bundled into a built `.app`)
-  is mostly **LGPL-2.1+** (glib/spice-gtk/gstreamer/libusb/usbredir/…), with **OpenSSL**
+  is mostly **LGPL-2.1+** (glib/spice-gtk/libusb/usbredir/…), with **OpenSSL**
   (Apache-2.0) and **MIT/BSD/ISC** (pixman, opus, libffi, libjpeg-turbo, PCRE2,
   libucontext). Full attribution +
   the LGPL written offer: [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt).
-- The GStreamer plugins are **statically** linked, so LGPL §6(a) (rebuildable open app
-  source) applies. The build bundles only the runtime closure, and no GPL component is
-  built at all.
+- The LGPL libraries are dynamically linked. The build bundles only the runtime
+  closure, and no GPL component is built at all.
 - **Distributing a built `.app`?** It already self-carries the verbatim LGPL-2.1 /
   Apache-2.0 / BSD / MIT / ISC texts at `Contents/Resources/Licenses/` (sources in
   [`licenses/`](licenses/)), plus the LGPL §6 written offer in

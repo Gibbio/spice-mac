@@ -10,7 +10,6 @@
 #
 # Output (./Sysroot):
 #   lib/*.dylib               runtime libraries, install names rewritten to @rpath
-#   lib/gstreamer-1.0/*.a     static GStreamer plugins CocoaSpice registers
 #   include/, lib/*/include   headers CocoaSpice compiles against
 #
 # The build is hermetic on purpose: Homebrew's pkg-config/meson/cmake/ninja are used
@@ -53,11 +52,6 @@ done
 TOOLS="$WORK/tools"
 mkdir -p "$TOOLS"
 for tool in meson ninja cmake pkg-config; do ln -sf "$(command -v $tool)" "$TOOLS/$tool"; done
-# GStreamer's pipeline parser needs bison >= 2.4; macOS ships 2.3. Homebrew's is
-# keg-only (it never shadows the system one), so link it in explicitly.
-BISON="$(brew --prefix bison 2>/dev/null)/bin/bison"
-[ -x "$BISON" ] || die "bison >= 2.4 not found (brew install bison)"
-ln -sf "$BISON" "$TOOLS/bison"
 HOST_PYTHON="$(command -v python3)"
 
 SDK="$(xcrun --sdk macosx --show-sdk-path)"
@@ -258,30 +252,6 @@ build_libusb() { configure_pkg libusb --disable-static --enable-shared --disable
 
 build_usbredir() { meson_pkg usbredir -Dtools=disabled -Dfuzzing=disabled -Dtests=disabled; }
 
-build_gstreamer() {
-    # Core libs shared, plugins also built static: CocoaSpice registers the plugins
-    # it needs from static archives (gst_ios_init.m), there is no plugin scanner.
-    meson_pkg gstreamer -Ddefault_library=both -Dregistry=false -Dtools=disabled \
-        -Dtests=disabled -Dexamples=disabled -Dbenchmarks=disabled -Dintrospection=disabled \
-        -Dnls=disabled -Ddoc=disabled -Dptp-helper=disabled -Dlibunwind=disabled \
-        -Dlibdw=disabled -Dbash-completion=disabled -Dcheck=disabled
-}
-
-build_gst-plugins-base() {
-    meson_pkg gst-plugins-base -Ddefault_library=both -Dauto_features=disabled \
-        -Dapp=enabled -Daudioconvert=enabled -Daudiorate=enabled -Daudioresample=enabled \
-        -Daudiotestsrc=enabled -Dgio=enabled -Dplayback=enabled -Dtypefind=enabled \
-        -Dvideoconvertscale=enabled -Dvideorate=enabled -Dvideotestsrc=enabled \
-        -Dvolume=enabled -Dadder=enabled -Dtools=disabled -Dtests=disabled \
-        -Dexamples=disabled -Dintrospection=disabled -Dnls=disabled -Ddoc=disabled
-}
-
-build_gst-plugins-good() {
-    meson_pkg gst-plugins-good -Ddefault_library=both -Dauto_features=disabled \
-        -Dautodetect=enabled -Dvideofilter=enabled -Dosxaudio=enabled -Djpeg=enabled \
-        -Dtests=disabled -Dexamples=disabled -Dnls=disabled -Ddoc=disabled
-}
-
 build_libucontext() {
     # Fast user-space coroutine switches for spice-gtk's channels (the alternative,
     # gthread coroutines, costs a thread handoff per yield). Only the prefixed
@@ -314,12 +284,11 @@ build_spice-gtk() {
         -Dsmartcard=disabled -Dsasl=disabled -Dlz4=disabled -Dopus=enabled \
         -Dintrospection=disabled -Dvapi=disabled -Dgtk_doc=disabled -Dpolkit=disabled \
         -Dlibcap-ng=disabled -Dwayland-protocols=disabled -Degl=disabled \
-        -Dcoroutine=libucontext -Dbuiltin-mjpeg=true
+        -Dcoroutine=libucontext -Dbuiltin-mjpeg=true -Dgstreamer=disabled
 }
 
 PACKAGES=(pyparsing proxy-libintl libffi pcre2 glib openssl pixman libjpeg-turbo opus
-          json-glib spice-protocol libusb usbredir gstreamer gst-plugins-base
-          gst-plugins-good libucontext spice-gtk)
+          json-glib spice-protocol libusb usbredir libucontext spice-gtk)
 
 # --- Post-processing ---------------------------------------------------------
 fix_install_names() {
@@ -344,11 +313,7 @@ fix_install_names() {
 }
 
 prune() {
-    # Shared GStreamer plugin modules and the static copies of the core libraries are
-    # by-products of default_library=both; the app links the static PLUGINS and the
-    # shared LIBRARIES only.
-    rm -f "$PREFIX"/lib/gstreamer-1.0/*.dylib "$PREFIX"/lib/gstreamer-1.0/*.so \
-          "$PREFIX"/lib/libgst*-1.0.a "$PREFIX"/lib/*.la
+    rm -f "$PREFIX"/lib/*.la
 }
 
 verify() {
@@ -370,7 +335,7 @@ verify() {
         printf '  pkg-config files reference /opt/homebrew\n' >&2; bad=1
     fi
     [ "$bad" -eq 0 ] || die "Sysroot verification failed (see above)."
-    log "verified: $(ls "$PREFIX"/lib/*.dylib | wc -l | tr -d ' ') dylib entries, $(ls "$PREFIX"/lib/gstreamer-1.0/*.a | wc -l | tr -d ' ') static plugins; @rpath-only, minos $MIN_MACOS"
+    log "verified: $(ls "$PREFIX"/lib/*.dylib | wc -l | tr -d ' ') dylib entries; @rpath-only, minos $MIN_MACOS"
 }
 
 # --- Main --------------------------------------------------------------------

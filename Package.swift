@@ -22,28 +22,13 @@ import PackageDescription
 let spiceLibraries = [
     "glib-2.0", "gobject-2.0", "gio-2.0", "gmodule-2.0",
     "spice-client-glib-2.0",
-    "gstreamer-1.0", "gstbase-1.0", "gstapp-1.0", "gstaudio-1.0", "gstvideo-1.0",
-    "gstpbutils-1.0", "gsttag-1.0",
     "usb-1.0",
-    "jpeg",
 ]
-// CocoaSpice's gst_ios_init.m statically registers these GStreamer plugins, so
-// their static archives (in Sysroot/lib/gstreamer-1.0/) must be linked.
-let gstPlugins = [
-    "adder", "app", "audioconvert", "audiorate", "audioresample", "audiotestsrc",
-    "autodetect", "coreelements", "gio", "jpeg", "osxaudio", "playback",
-    "typefindfunctions", "videoconvertscale", "videofilter", "videorate",
-    "videotestsrc", "volume",
-]
-// macOS system frameworks the plugins/codecs need (osxaudio → CoreAudio/AudioToolbox/…).
-let systemFrameworks = ["CoreAudio", "AudioToolbox", "AudioUnit", "CoreMedia", "CoreVideo", "VideoToolbox"]
 
 // Build the linker flags imperatively — a single large `+`/flatMap expression
 // makes the manifest type-checker time out.
 var spiceLinkFlags: [String] = ["-L", "Sysroot/lib"]
 for library in spiceLibraries { spiceLinkFlags += ["-l\(library)"] }
-for framework in systemFrameworks { spiceLinkFlags += ["-framework", framework] }
-for plugin in gstPlugins { spiceLinkFlags += ["-Xlinker", "Sysroot/lib/gstreamer-1.0/libgst\(plugin).a"] }
 spiceLinkFlags += ["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]
 spiceLinkFlags += ["-Xlinker", "-rpath", "-Xlinker", "@loader_path/../Frameworks"]
 

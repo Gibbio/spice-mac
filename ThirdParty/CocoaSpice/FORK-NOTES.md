@@ -121,9 +121,13 @@ the server's first MARK) and 0012 (the playout setter and the statistics getters
 - **`Package.swift`** — compiles against the headers `scripts/build-deps.sh` installs
   into `<spice-mac>/Sysroot` (the same build the app links) instead of the vendored
   `Sources/CocoaSpice/ExternalHeaders/`, which no longer matches the libraries
-  (spice-gtk 0.43, glib 2.88, GStreamer 1.28) and is unused.
-- **`Sources/CocoaSpice/gst_ios_init.m`** — GStreamer 1.22 merged the `videoconvert`
-  and `videoscale` plugins into `videoconvertscale`; declare/register that instead.
+  (spice-gtk 0.43, glib 2.88) and is unused.
+- **No GStreamer.** SpiceMac builds spice-gtk without it (patch 0014), so
+  `Sources/CocoaSpice/gst_ios_init.m/.h` and their call in `CSMain.m`
+  (`spice_main_loop`) are removed, and `Package.swift` no longer looks for its
+  headers or links it in the test target. Besides registering static plugins,
+  `gst_ios_init()` pointed `HOME`, `TMPDIR` and the XDG directories at iOS-style
+  paths (`HOME` at `~/Documents`); SpiceMac keeps the real ones.
 - CocoaSpice relies on `spice_util_set_main_context()` from UTM's spice-gtk patches;
   their port to 0.43 lives in `deps/patches/spice-gtk/`.
 

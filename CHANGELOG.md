@@ -41,8 +41,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   then, was shown 69 ms after arrival instead of 225 ms, with 4 late frames
   instead of 25. The buffer adapts to the pauses of up to ~130 ms that the audio
   stream has on the Mac's Wi-Fi: over 15 min, two dropouts in the first minute and
-  none after (a fixed buffer: 11 in 18 min). `SPICE_AUDIO_BACKEND=gstreamer` brings
-  the old output back, without the microphone.
+  none after (a fixed buffer: 11 in 18 min).
 - **Connection ▸ Share Microphone with VM**, off by default: until it is on, a VM
   that records gets no sound, and SpiceMac never opens the Mac's microphone.
 - **View ▸ Show Statistics** (⌃⌘I): a panel over the display with bandwidth by
@@ -94,6 +93,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- **GStreamer.** Nothing in the client needs it any more: audio goes through
+  CoreAudio, MJPEG through spice-gtk's built-in decoder and H.264 through
+  VideoToolbox, and the GStreamer build had no other decoder (no VP8, VP9 or
+  H.265), so the server is offered the same codecs as before. spice-gtk is built
+  with `-Dgstreamer=disabled` (patch 0014); GStreamer, its base and good plugins
+  and the 18 static plugins the app linked are gone, and so is `bison` from the
+  build tools. Lost with it: `SPICE_GST_AUDIOSINK` and `GST_DEBUG`. CocoaSpice no
+  longer redirects `HOME` and the XDG directories to iOS-style paths at start-up.
 - `scripts/fetch-sysroot.sh` and `scripts/upgrade-openssl.sh` (the prebuilt-sysroot
   flow), and the `Frameworks/` staging directory.
 

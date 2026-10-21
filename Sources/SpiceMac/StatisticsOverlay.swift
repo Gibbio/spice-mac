@@ -153,7 +153,7 @@ struct StatisticsFormatter {
         let microphone: String
         switch (sample.microphoneShared, stats.guestRecording) {
         case _ where stats.audioBuffered < 0:
-            microphone = "not available (GStreamer audio)"
+            microphone = "not available"
         case (true, true):   microphone = "shared · in use"
         case (true, false):  microphone = "shared · not in use"
         case (false, true):  microphone = "not shared · the VM is trying to record"

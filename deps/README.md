@@ -1,7 +1,7 @@
 # Native dependencies
 
 [`scripts/build-deps.sh`](../scripts/build-deps.sh) builds SpiceMac's native SPICE
-stack (spice-gtk, glib, GStreamer, OpenSSL, …) from source into `Sysroot/`. What it
+stack (spice-gtk, glib, OpenSSL, …) from source into `Sysroot/`. What it
 builds is described here:
 
 - **`sources.lock`** — every package, in build order, one line each. Releases are
@@ -23,9 +23,8 @@ Edit its line in `sources.lock`, then run `./scripts/build-deps.sh`:
   in the line.
 - **A git package:** the new commit id (`git ls-remote <url> <branch>`).
 
-`gstreamer`, `gst-plugins-base` and `gst-plugins-good` always move together. A
-spice-gtk update may need a newer `spice-protocol` (meson says so). After a large
-jump (glib, GStreamer) use `./scripts/build-deps.sh --clean` so everything above it
+A spice-gtk update may need a newer `spice-protocol` (meson says so). After a large
+jump (glib) use `./scripts/build-deps.sh --clean` so everything above it
 is rebuilt. Then `make build` and re-test against a VM: display, input, clipboard,
 audio, USB menu, a video stream.
 
@@ -53,6 +52,6 @@ committed by mistake still applies cleanly.
   any commit, so the build refuses to continue if it finds one — convert it in 0002.
 - **No GPL** in anything built or bundled: check a new package's license and add it
   to `../THIRD-PARTY-LICENSES.txt` and `../licenses/`.
-- **Hermetic:** Homebrew provides only tools (meson, ninja, cmake, pkg-config,
-  bison); the final check rejects any library that references `/opt/homebrew`, a
+- **Hermetic:** Homebrew provides only tools (meson, ninja, cmake, pkg-config);
+  the final check rejects any library that references `/opt/homebrew`, a
   path outside `@rpath` and the OS, or a macOS newer than 12.

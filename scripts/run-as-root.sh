@@ -7,7 +7,7 @@
 # `com.apple.vm.device-access` entitlement, cannot be carried by an ad-hoc signature.
 #
 # ⚠️  TRUST BOUNDARY. This runs the ENTIRE app as root — including the SPICE/TLS/
-# glib/gstreamer/clipboard/agent parsers that consume data from the (remote) SPICE
+# glib/clipboard/agent parsers that consume data from the (remote) SPICE
 # server. A bug in any of them becomes root-impact. Run this ONLY against a VM and
 # a Proxmox node you TRUST, and ONLY when you actually need a kernel-claimed device.
 # (A dedicated root USB helper that would keep the SPICE stack unprivileged was

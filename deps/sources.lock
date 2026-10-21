@@ -3,7 +3,7 @@
 #
 # Every download is checked against its SHA-256 and the build fails closed on a
 # mismatch (printing the hash it got). Where upstream publishes a checksum (GNOME,
-# GStreamer, OpenSSL, xiph, cairographics) it was checked against it; GitHub-only
+# OpenSSL, xiph, cairographics) it was checked against it; GitHub-only
 # releases were pinned on first download.
 #
 # git+<url> lines (the SPICE projects, which tag releases rarely) follow a branch:
@@ -26,9 +26,6 @@ json-glib        1.10.8   https://download.gnome.org/sources/json-glib/1.10/json
 spice-protocol   master   git+https://gitlab.freedesktop.org/spice/spice-protocol.git 499cc8326a672e9e5747efc017319b19e1594b42
 libusb           1.0.30   https://github.com/libusb/libusb/releases/download/v1.0.30/libusb-1.0.30.tar.bz2                       fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf
 usbredir         main     git+https://gitlab.freedesktop.org/spice/usbredir.git f4406c506726853d1795eba428256b3922e1a6ad
-gstreamer        1.28.8   https://gstreamer.freedesktop.org/src/gstreamer/gstreamer-1.28.8.tar.xz                                baa8e86985ad6417cc0ad6e7b79ff2884c6779c8b1c7a6240e7121822c86e524
-gst-plugins-base 1.28.8   https://gstreamer.freedesktop.org/src/gst-plugins-base/gst-plugins-base-1.28.8.tar.xz                  ade70e3381fcbb024f1f20aa9ede9b5654aeed39d5bd70b1a98f53015e501117
-gst-plugins-good 1.28.8   https://gstreamer.freedesktop.org/src/gst-plugins-good/gst-plugins-good-1.28.8.tar.xz                  a7670ed900d3d03be744d25c1873b239896e9a82ce6d17f8febc6fffbaee9521
 libucontext      1.5.2    https://github.com/kaniini/libucontext/archive/refs/tags/libucontext-1.5.2.tar.gz                          9230397327bbf580e04c9456d1509e9af19599c7f6deca7f75969ece6e9d598e
 spice-gtk        master   git+https://gitlab.freedesktop.org/spice/spice-gtk.git 5f261796aefe9deedd17e80a837f13949028fba5
 

@@ -58,13 +58,13 @@ gate any wider distribution.
 ## Residual risks (not fixed in code)
 
 1. **Native stack age — resolved by building from source.** Every native library is
-   now a current upstream release (spice-gtk 0.43, glib 2.88, GStreamer 1.28,
-   OpenSSL 3.5 LTS — see `deps/sources.lock`), replacing the UTM sysroot's glib ~2.69
-   and GStreamer 1.19.1 development snapshot. What remains is keeping the pins
+   now a current upstream release (spice-gtk 0.43, glib 2.88, OpenSSL 3.5 LTS — see
+   `deps/sources.lock`), replacing the UTM sysroot's glib ~2.69 and GStreamer 1.19.1
+   development snapshot; GStreamer is no longer used at all. What remains is keeping the pins
    current: bump a package in `deps/sources.lock` when upstream ships a security fix.
 
 2. **Running as root for USB.** `scripts/run-as-root.sh` runs the *entire* app —
-   including the SPICE/TLS/glib/gstreamer/clipboard/agent parsers that consume
+   including the SPICE/TLS/glib/clipboard/agent parsers that consume
    hostile-server data — as root, so any parser bug becomes root-impact. This is the
    **supported USB path** for an ad-hoc build; the script warns and confirms, and it
    is only needed to redirect a device a macOS kernel driver owns. **Mitigation

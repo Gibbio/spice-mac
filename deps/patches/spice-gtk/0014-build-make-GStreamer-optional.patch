@@ -1,0 +1,220 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Er Gibbio <gibbio@pm.me>
+Date: Wed, 21 Oct 2026 15:43:35 +0200
+Subject: [PATCH 14/14] build: make GStreamer optional
+
+spice-gtk 0.43 requires GStreamer for its audio backend and its video
+decoders. On macOS, with the CoreAudio backend (0013), the built-in MJPEG
+decoder and VideoToolbox for H.264/H.265 (0006), nothing needs it but VP8
+and VP9, which the client then simply does not offer the server.
+
+-Dgstreamer=disabled builds without it: no GStreamer decoder or audio
+backend, no codec capability that only GStreamer could decode, and the
+gst-video-overlay signal takes a plain pointer (only ever NULL then).
+spice-client-gtk still needs it, for its widget's video overlays.
+---
+ meson.build                | 20 ++++++++++++++++----
+ meson_options.txt          |  4 ++++
+ src/channel-display-priv.h |  6 ++++++
+ src/channel-display.c      | 15 +++++++++++++++
+ src/meson.build            | 12 +++++++++---
+ src/spice-audio.c          |  6 ++++++
+ 6 files changed, 56 insertions(+), 7 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index eca2311..8f2a320 100644
+--- a/meson.build
++++ b/meson.build
+@@ -212,10 +212,22 @@ summary_info += {'webdav': spice_gtk_has_phodav}
+ 
+ gstreamer_version = '1.10'
+ gstreamer_version_info = '>= @0@'.format(gstreamer_version)
+-deps = ['gstreamer-1.0', 'gstreamer-base-1.0', 'gstreamer-app-1.0', 'gstreamer-audio-1.0', 'gstreamer-video-1.0']
+-foreach dep : deps
+-  spice_glib_deps += dependency(dep, version: gstreamer_version_info)
+-endforeach
++spice_gtk_has_gstreamer = false
++if not get_option('gstreamer').disabled()
++  gstreamer_deps = []
++  foreach dep : ['gstreamer-1.0', 'gstreamer-base-1.0', 'gstreamer-app-1.0', 'gstreamer-audio-1.0', 'gstreamer-video-1.0']
++    gstreamer_deps += dependency(dep, version: gstreamer_version_info, required : get_option('gstreamer'))
++  endforeach
++  spice_gtk_has_gstreamer = true
++  foreach d : gstreamer_deps
++    spice_gtk_has_gstreamer = spice_gtk_has_gstreamer and d.found()
++  endforeach
++  if spice_gtk_has_gstreamer
++    spice_glib_deps += gstreamer_deps
++    spice_gtk_config_data.set('HAVE_GSTREAMER', '1')
++  endif
++endif
++summary_info += {'gstreamer': spice_gtk_has_gstreamer}
+ 
+ # builtin-mjpeg
+ spice_gtk_has_builtin_mjpeg = false
+diff --git a/meson_options.txt b/meson_options.txt
+index f31d5ce..8440289 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -85,6 +85,10 @@ option('gtk_doc',
+        type : 'feature',
+        description : 'Generate API documentation with gtk-doc')
+ 
++option('gstreamer',
++    type : 'feature',
++    description : 'GStreamer audio backend and video decoders (spice-mac: optional when CoreAudio and VideoToolbox cover them)')
++
+ option('recorder',
+     type : 'boolean',
+     value : false,
+diff --git a/src/channel-display-priv.h b/src/channel-display-priv.h
+index 9abfad7..4b21dd6 100644
+--- a/src/channel-display-priv.h
++++ b/src/channel-display-priv.h
+@@ -29,7 +29,11 @@
+ #include "common/quic.h"
+ #include "common/rop3.h"
+ 
++#ifdef HAVE_GSTREAMER
+ #include <gst/gst.h>
++#else
++typedef struct _GstPipeline GstPipeline;   /* only ever NULL without GStreamer */
++#endif
+ 
+ G_BEGIN_DECLS
+ 
+@@ -85,8 +89,10 @@ struct VideoDecoder {
+ #ifdef HAVE_BUILTIN_MJPEG
+ VideoDecoder* create_mjpeg_decoder(int codec_type, display_stream *stream);
+ #endif
++#ifdef HAVE_GSTREAMER
+ VideoDecoder* create_gstreamer_decoder(int codec_type, display_stream *stream);
+ gboolean gstvideo_has_codec(int codec_type);
++#endif
+ #ifdef HAVE_VIDEOTOOLBOX
+ VideoDecoder* create_vt_decoder(int codec_type, display_stream *stream);
+ gboolean vtvideo_has_codec(int codec_type);
+diff --git a/src/channel-display.c b/src/channel-display.c
+index b40415f..605f9c7 100644
+--- a/src/channel-display.c
++++ b/src/channel-display.c
+@@ -533,7 +533,11 @@ static void spice_display_channel_class_init(SpiceDisplayChannelClass *klass)
+                      g_cclosure_user_marshal_BOOLEAN__POINTER,
+                      G_TYPE_BOOLEAN,
+                      1,
++#ifdef HAVE_GSTREAMER
+                      GST_TYPE_PIPELINE);
++#else
++                     G_TYPE_POINTER);
++#endif
+ 
+     channel_set_handlers(SPICE_CHANNEL_CLASS(klass));
+ }
+@@ -1051,12 +1055,21 @@ static void spice_display_channel_set_capabilities(SpiceChannel *channel)
+             continue;
+         }
+ #endif
++#ifdef HAVE_GSTREAMER
+         if (gstvideo_has_codec(i)) {
+             /* use extra parenthesis to avoid an unwanted macro expansion */
+             (spice_channel_set_capability)(channel, gst_opts[i].cap);
+         } else {
+             SPICE_DEBUG("GStreamer does not support the %s codec", gst_opts[i].name);
+         }
++#else
++#ifdef HAVE_BUILTIN_MJPEG
++        if (i == SPICE_VIDEO_CODEC_TYPE_MJPEG) {
++            continue;
++        }
++#endif
++        SPICE_DEBUG("no decoder for the %s codec", gst_opts[i].name);
++#endif
+     }
+ }
+ 
+@@ -1521,8 +1534,10 @@ static display_stream *display_stream_create(SpiceChannel *channel,
+             break;
+         }
+ #endif
++#ifdef HAVE_GSTREAMER
+         st->video_decoder = create_gstreamer_decoder(codec_type, st);
+         st->decoder_name = "GStreamer";
++#endif
+         break;
+     }
+     if (st->video_decoder == NULL) {
+diff --git a/src/meson.build b/src/meson.build
+index 3fad53b..3944705 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -142,7 +142,6 @@ spice_client_glib_sources = [
+   'bio-gio.c',
+   'bio-gio.h',
+   'channel-base.c',
+-  'channel-display-gst.c',
+   'channel-display-priv.h',
+   'channel-playback-priv.h',
+   'channel-usbredir-priv.h',
+@@ -165,8 +164,6 @@ spice_client_glib_sources = [
+   'spice-file-transfer-task.c',
+   'spice-file-transfer-task-priv.h',
+   'spice-glib-main.c',
+-  'spice-gstaudio.c',
+-  'spice-gstaudio.h',
+   'spice-option.h',
+   'spice-session-priv.h',
+   'spice-uri.c',
+@@ -185,6 +182,12 @@ if spice_gtk_has_videotoolbox
+   spice_client_glib_sources += 'channel-display-vt.c'
+ endif
+ 
++if spice_gtk_has_gstreamer
++  spice_client_glib_sources += ['channel-display-gst.c',
++                                'spice-gstaudio.c',
++                                'spice-gstaudio.h']
++endif
++
+ if spice_gtk_has_coreaudio
+   spice_client_glib_sources += ['spice-coreaudio.c',
+                                 'spice-coreaudio.h']
+@@ -317,6 +320,9 @@ endif
+ 
+ 
+ if spice_gtk_has_gtk
++  if not spice_gtk_has_gstreamer
++    error('spice-client-gtk needs GStreamer (its widget hosts GStreamer video overlays)')
++  endif
+   #
+   # Source files for spice-client-gtk
+   #
+diff --git a/src/spice-audio.c b/src/spice-audio.c
+index d84fbee..551a8be 100644
+--- a/src/spice-audio.c
++++ b/src/spice-audio.c
+@@ -40,7 +40,9 @@
+ #include "spice-session-priv.h"
+ #include "spice-channel-priv.h"
+ #include "spice-audio-priv.h"
++#ifdef HAVE_GSTREAMER
+ #include "spice-gstaudio.h"
++#endif
+ #ifdef HAVE_COREAUDIO
+ #include "spice-coreaudio.h"
+ #endif
+@@ -243,12 +245,16 @@ SpiceAudio *spice_audio_new_priv(SpiceSession *session, GMainContext *context,
+         name = g_get_application_name();
+ 
+ #ifdef HAVE_COREAUDIO
++#ifdef HAVE_GSTREAMER
+     /* SPICE_AUDIO_BACKEND=gstreamer keeps GStreamer's, e.g. to compare */
+     if (g_strcmp0(g_getenv("SPICE_AUDIO_BACKEND"), "gstreamer") != 0)
++#endif
+         self = SPICE_AUDIO(spice_coreaudio_new(session, context, name));
+ #endif
++#ifdef HAVE_GSTREAMER
+     if (self == NULL)
+         self = SPICE_AUDIO(spice_gstaudio_new(session, context, name));
++#endif
+     if (self != NULL) {
+         spice_g_signal_connect_object(session, "notify::enable-audio", G_CALLBACK(session_enable_audio), self, 0);
+         spice_g_signal_connect_object(session, "channel-new", G_CALLBACK(channel_new), self, G_CONNECT_AFTER);

@@ -20,7 +20,7 @@ let sysroot = URL(fileURLWithPath: #filePath)
     .appendingPathComponent("../../Sysroot")
     .standardizedFileURL.path
 let sysrootHeaders = [
-    "include", "include/glib-2.0", "lib/glib-2.0/include", "include/gstreamer-1.0",
+    "include", "include/glib-2.0", "lib/glib-2.0/include",
     "include/libusb-1.0", "include/pixman-1", "include/spice-1", "include/spice-client-glib-2.0",
 ].flatMap { ["-I", "\(sysroot)/\($0)"] }
 
@@ -72,7 +72,6 @@ let package = Package(
             dependencies: ["CocoaSpice"],
             linkerSettings: [
                 .linkedLibrary("glib-2.0"),
-                .linkedLibrary("gstreamer-1.0"),
                 .linkedLibrary("usb-1.0"),
                 .linkedLibrary("spice-client-glib-2.0")]),
     ]

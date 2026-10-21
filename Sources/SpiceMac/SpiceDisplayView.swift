@@ -286,6 +286,20 @@ final class SpiceDisplayView: MTKView {
             && window?.isKeyWindow == true
             && router.input != nil
             && router.input?.serverModeCursor == false
+            && isPointerOverView
+    }
+
+    /// Whether the pointer is over this view and not over another window. The
+    /// preference can change, and a window become key, while the pointer is on
+    /// the menu bar or another window; hiding it there would leave it hidden,
+    /// since no mouseExited follows.
+    private var isPointerOverView: Bool {
+        guard let window else { return false }
+        let mouse = NSEvent.mouseLocation
+        guard NSWindow.windowNumber(at: mouse, belowWindowWithWindowNumber: 0) == window.windowNumber else {
+            return false
+        }
+        return bounds.contains(convert(window.convertPoint(fromScreen: mouse), from: nil))
     }
 
     func updateHostCursorVisibility() {

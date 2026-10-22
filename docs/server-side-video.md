@@ -27,7 +27,7 @@ Keep in mind before trying any of them:
 | 0 | nothing (Proxmox VE 9, spice-server 0.15.2) | MJPEG | 23 | 15 Mbit/s (37–50 with noise) | 5–9% | — |
 | 1 | + `gstreamer1.0-plugins-ugly` (x264) | H.264, software | 30.7 | 6.6 Mbit/s (59 with noise) | 37% (48% with noise) | 0010 |
 | 2 | + spice-server master, own package | H.264, software | 30.8 | 5.6 Mbit/s | 38% | 0010, 0011 |
-| 3 | + VA-API (Quick Sync), four local patches | H.264, GPU | 29.7 | 3.2 Mbit/s | 7% | 0010, 0011, 0016 |
+| 3 | + VA-API (Quick Sync), local patches | H.264, GPU | 29.7 | 3.2 Mbit/s | 7% | 0010, 0011, 0016, 0023 |
 
 The client patches are in `deps/patches/spice-gtk/`, and current SpiceMac builds
 have them. H.264 is still opt-in: turn on **Connection ▸ Prefer H.264 Video**
@@ -99,28 +99,33 @@ virt-viewer) may hit the same MJPEG cut; that was not tested.
 ## Level 3: H.264 on the GPU (Quick Sync)
 
 ```sh
-apt-get install --no-install-recommends gstreamer1.0-vaapi intel-media-va-driver vainfo
-vainfo      # H.264 must be listed with an encode entrypoint (EncSlice or EncSliceLP)
+apt-get install --no-install-recommends intel-media-va-driver gstreamer1.0-plugins-base \
+    ./gstreamer1.0-va-local.deb      # GStreamer's va plugin alone, built below
 qm reboot <vmid>
 ```
 
 When the node has an Intel GPU, spice-server 0.16 looks for an `msdk`, `va` or
 `vaapi` H.264 encoder and uses it in place of x264, converting colours on the GPU
-too. `gstreamer1.0-vaapi` provides `vaapih264enc` with 18 packages, all
-libraries; it is also what the newer `va` plugin needs (below), which on its own
-comes only inside `gstreamer1.0-plugins-bad` and its hundred dependencies. The
-GPU must not be passed through to a VM.
+too. The GPU must not be passed through to a VM. We use the `va` plugin's
+`vah264lpenc`; `gstreamer1.0-vaapi`'s `vaapih264enc`, which we tried first,
+fails at every stream size change (below). The `va` plugin comes only inside
+`gstreamer1.0-plugins-bad`, with 133 more packages here, so we package its one
+file: with it, the server package and the lines above, 31 packages on our node,
+all of them Debian's except those two. Optionally, `vainfo` (package `vainfo`)
+lists H.264 with an `EncSliceLP` entrypoint on such a GPU.
 
 With the server's own settings (constant QP 26), streams were 30 fps at 1.7 Mbit/s
 and 11% of a core, but visibly softer than x264, which runs at QP 15 on most
-desktop content. We changed two things in the server, applied as patches in
-`debian/patches/` of the package built at level 2:
+desktop content. The patches below are applied in `debian/patches/` of the
+package built at level 2. The first two came with `vaapih264enc`:
 
 - **Constant quality instead of constant QP.** QVBR at quality 16 keeps the
   picture close to x264's and lets the bitrate follow the content, capped by the
   bitrate the server's rate control picks. Which rate controls exist depends on
   the GPU and driver (this one offers CBR, VBR, CQP, QVBR, but not ICQ), so this
-  is not a general default.
+  is not a general default. This diff sets it for `vaapih264enc` only, and our
+  current package no longer carries it: for `vah264lpenc` the same setting is
+  part of the `vah264lpenc` patch below.
 
   ```diff
   --- a/server/gstreamer-encoder.c
@@ -134,7 +139,8 @@ desktop content. We changed two things in the server, applied as patches in
 
 - **Bitrate unit.** The server divides the bitrate by 1024 only when the
   encoder's property description says `kbit`. `vaapih264enc` says `kbps`, so it
-  got a cap 1024 times too high.
+  got a cap 1024 times too high; the `va` plugin's encoders say `kbps` too, and
+  this patch stays in our package.
 
   ```diff
   --- a/server/gstreamer-encoder.c
@@ -148,7 +154,7 @@ desktop content. We changed two things in the server, applied as patches in
        }
   ```
 
-Results on smooth content:
+Results on smooth content, with `vaapih264enc`:
 
 | Encoder settings | fps | Bandwidth | Node CPU | Picture |
 |---|---|---|---|---|
@@ -231,12 +237,13 @@ the `va` plugin fails too (22 encoded, 9 errors). Two more patches:
   (plus a `gboolean gstenc_caps_are_dynamic;` in `SpiceGstEncoder`).
 
 The `va` plugin is one file, `libgstva.so`, in `gstreamer1.0-plugins-bad`; the
-libraries it uses (`libgstreamer-plugins-bad1.0-0`, libva, gudev) are already on
-the node with `gstreamer1.0-vaapi`. We packaged that file alone, from Debian's
-own package of the same version, instead of installing the hundred others:
+libraries it uses (`libgstreamer-plugins-bad1.0-0`, libva, gudev) are packaged
+on their own, and the package below depends on them. We packaged that file
+alone, from Debian's own package of the same version, instead of installing the
+133 others:
 
 ```sh
-apt-get download gstreamer1.0-plugins-bad
+apt-get download gstreamer1.0-plugins-bad      # on any trixie amd64 system
 dpkg -x gstreamer1.0-plugins-bad_*.deb x
 mkdir -p pkg/DEBIAN pkg/usr/lib/x86_64-linux-gnu/gstreamer-1.0
 cp x/usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstva.so pkg/usr/lib/x86_64-linux-gnu/gstreamer-1.0/
@@ -250,9 +257,10 @@ Conflicts: gstreamer1.0-plugins-bad
 Description: GStreamer va plugin only (libgstva.so from gstreamer1.0-plugins-bad)
 END
 dpkg-deb --root-owner-group --build pkg gstreamer1.0-va-local.deb
-apt-get install ./gstreamer1.0-va-local.deb
-gst-inspect-1.0 vah264lpenc      # VA-API H.264 Low Power Encoder
 ```
+
+(`gst-inspect-1.0 vah264lpenc`, from `gstreamer1.0-tools`, shows "VA-API H.264
+Low Power Encoder" once it is installed.)
 
 When Debian updates `gstreamer1.0-plugins-bad`, rebuild it from the new version.
 
@@ -262,7 +270,64 @@ switched to H.264, instead of 30, and 29.4 fps against 22.4 with MJPEG
 server's rate control lowered the bit rate report after report against the
 margins SpiceMac reported before it, down to ~0.1 Mbit/s and 3 fps within a
 minute; with it, 30 fps for minutes, also after changing Video Delay from 50 to
-30 ms.
+30 ms. And 0023 when sound plays with Sync Video to Audio off: the reports then
+followed the audio's delay, and the rate control cut its bit rate limit from 74
+to 15.6 Mbit/s in 6 minutes.
+
+### Frames bigger than the stream
+
+When the guest draws something next to the video in the same frame (a counter or
+a progress bar under a player; on our test page, a line of text or a few rows
+above the video), spice-server sends that frame as part of the stream at its
+own, bigger size: a "sized" frame, in the protocol since 2012 for exactly this
+case. The H.264 encoder restarts at every size change, to the bigger size and
+back with the next frame, each time with a key frame. On our page that was two
+key frames a second, ~82 KB each against ~16 KB for a normal frame: +28% of the
+stream (3.9 to 5.0 Mbit/s), and more on less animated content, whose normal
+frames are smaller. MJPEG, which encodes every frame on its own, is not
+affected. (SpiceMac's decoder used to make a new session at each change too;
+patch 0022 keeps the previous ones, which also helps against a stock server.)
+
+A patch splits such frames, for encoders that restart on a size change: the
+stream's area of the frame is encoded at the stream's size as a normal frame, and
+the rest of the drawable, within its clip, goes out as images right after it,
+before any later drawing. Anything unusual (scaling, a mask, a palette, more than
+8 rectangles, an encoder refusing the frame) falls back to the sized frame. The
+protocol does not change, and clients without the sized-frame capability, which
+got the whole frame as a lossless image, get the split frame too. It is about 150
+lines in `server/dcc-send.cpp`:
+[spice-server/stream-split-sized.patch](spice-server/stream-split-sized.patch).
+On our page, over 3.5 minutes: 217 frames split, the rest (1158×3 there) sent as
+an 84-byte image each time, the encoder configured once, a single key frame. In
+spice-server's own test (`server/tests/test-display-streaming.c`, whose sized mode
+cannot be enabled from its command line), bands drawn in the extra area arrived
+in place, also under a clip. Not tried yet: guests whose bitmaps are stored
+bottom-up (the code handles them).
+
+### Very thin streams
+
+Windows sometimes draws strips of a video area on their own, 1158×4 or 1158×13,
+and with `videostreaming=all` spice-server turns them into streams of their own.
+`vah264lpenc` refuses frames below 32 pixels (1158×16 failed, 1158×32 worked):
+the server built a pipeline, saw it fail, and tried three times per size, about
+30 ms each on the thread that sends the whole display, and again at every size
+change of the strip. A patch makes the encoder refuse such frames before building
+anything; they go out as images, which is where they ended up anyway:
+
+```diff
+--- a/server/gstreamer-encoder.c
++++ b/server/gstreamer-encoder.c
++#define SPICE_GST_MIN_FRAME_SIZE 32
+@@ spice_gst_encoder_configure_pipeline(SpiceGstEncoder *encoder,
+     const SpiceFormatForGStreamer *format = GSTREAMER_FORMAT_INVALID;
+ 
++    if (width < SPICE_GST_MIN_FRAME_SIZE || height < SPICE_GST_MIN_FRAME_SIZE) {
++        return VIDEO_ENCODER_FRAME_UNSUPPORTED;
++    }
+```
+
+(The patch also logs the first such frame of a stream.) No thin strip turned up
+in our runs since, so this one is checked only in that nothing else changed.
 
 ## Faster file copies
 
@@ -307,11 +372,12 @@ keep the nodes of a cluster on the same package.
 
 ```sh
 apt-get install --allow-downgrades libspice-server1=0.15.2-1+b1     # level 2
-apt-get purge gstreamer1.0-va-local                                  # level 3, va plugin
-apt-get purge gstreamer1.0-vaapi intel-media-va-driver vainfo        # level 3
+apt-get purge gstreamer1.0-va-local intel-media-va-driver           # level 3
 apt-get purge gstreamer1.0-plugins-ugly                              # level 1
+apt-get autoremove                                                   # their libraries
 qm reboot <vmid>
 ```
 
 Purge `gstreamer1.0-plugins-base` and `-good` too if they were installed only for
-level 1. Each VM keeps the old libraries until its QEMU process restarts.
+these levels, and `gstreamer1.0-vaapi` and `vainfo` if you installed them. Each VM
+keeps the old libraries until its QEMU process restarts.

@@ -1,0 +1,224 @@
+Description: dcc-send: split sized stream frames instead of re-keying the encoder
+ When the guest draws a video frame together with something next to it (a
+ counter, a progress bar), spice-server sends it as a "sized" stream frame at
+ its own, bigger size. Encoders that restart on a size change (GStreamer's, for
+ H.264 a new SPS and a key frame) then restart twice: to the bigger size and
+ back with the next frame. With a counter changing once a second next to the
+ video: two H.264 key frames a second, about 5 times a normal frame each, +28%
+ of the stream in our test (more for less animated content).
+ For such encoders, encode the stream's area of the frame at the stream's size
+ as a normal frame, and send the rest of the drawable (within its clip) as
+ images right after it (pipe_add_tail(): the next messages, before any later
+ drawing). MJPEG, which encodes every frame on its own, keeps sized frames.
+ Anything else (scaling, a mask, a palette, more than 8 rects, an encoder that
+ refuses the frame) falls back to the sized frame as before. Clients without
+ the SIZED_STREAM cap get the split frame too instead of a lossless drawable.
+Author: spice-mac local build
+Forwarded: no
+Last-Update: 2026-10-22
+---
+--- a/server/dcc-send.cpp
++++ b/server/dcc-send.cpp
+@@ -1690,7 +1690,144 @@
+     agent->stats.end = frame_mm_time;
+ #endif
+ }
++
++/* A stream frame the guest drew together with something next to it (a "sized"
++ * frame, bigger than the stream) is split, for encoders that restart on a size
++ * change: the stream's area is encoded at the stream's size, as a normal frame,
++ * and the rest goes out as images right after it. Sent whole, at its own size,
++ * it made such an encoder start over twice (to the bigger size and back), each
++ * time with a key frame: with a counter changing once a second next to a video,
++ * two H.264 key frames a second, about 5 times a normal frame each. */
++#define STREAM_STRIP_MAX_RECTS 8
+ 
++/* Copies len bytes from offset in chunks; *chunk and *chunk_start keep the
++ * position between calls, for offsets that only grow. */
++static bool chunks_copy(const SpiceChunks *chunks, uint32_t *chunk, size_t *chunk_start,
++                        size_t offset, uint8_t *dest, size_t len)
++{
++    while (len > 0) {
++        if (*chunk >= chunks->num_chunks) {
++            return false;
++        }
++        const SpiceChunk *c = &chunks->chunk[*chunk];
++        if (offset >= *chunk_start + c->len) {
++            *chunk_start += c->len;
++            (*chunk)++;
++            continue;
++        }
++        size_t in_chunk = offset - *chunk_start;
++        size_t n = MIN(len, c->len - in_chunk);
++        memcpy(dest, c->data + in_chunk, n);
++        dest += n;
++        offset += n;
++        len -= n;
++    }
++    return true;
++}
++
++/* The images of the part of drawable outside the stream's area (within the
++ * drawable's clip), copied from its bitmap; false if it does not split. */
++static bool red_stream_strip_items(Drawable *drawable, const VideoStream *stream,
++                                   red::shared_ptr<RedImageItem> *items, uint32_t *num_items)
++{
++    RedDrawable *red_drawable = drawable->red_drawable.get();
++    SpiceCopy *copy = &red_drawable->u.copy;
++    SpiceBitmap *bitmap = &copy->src_bitmap->u.bitmap;
++    const SpiceRect *bbox = &red_drawable->bbox;
++    int bpp = bitmap_fmt_get_bytes_per_pixel(bitmap->format);
++    bool top_down = bitmap->flags & SPICE_BITMAP_FLAGS_TOP_DOWN;
++    QRegion strip;
++    SpiceRect *rects;
++    uint32_t num_rects;
++    bool ok = true;
++
++    region_init(&strip);
++    region_add(&strip, bbox);
++    region_remove(&strip, &stream->dest_area);
++    if (red_drawable->clip.type == SPICE_CLIP_TYPE_RECTS) {
++        QRegion clip;
++
++        region_init(&clip);
++        region_add_clip_rects(&clip, red_drawable->clip.rects);
++        region_and(&strip, &clip);
++        region_destroy(&clip);
++    }
++    rects = region_dup_rects(&strip, &num_rects);
++    region_destroy(&strip);
++    if (num_rects > STREAM_STRIP_MAX_RECTS) {
++        g_free(rects);
++        return false;
++    }
++
++    for (uint32_t i = 0; ok && i < num_rects; i++) {
++        const SpiceRect *r = &rects[i];
++        int width = r->right - r->left;
++        int height = r->bottom - r->top;
++        int stride = width * bpp;
++        int src_x = copy->src_area.left + (r->left - bbox->left);
++        int src_y = copy->src_area.top + (r->top - bbox->top);
++        /* the rect's rows in memory order: top first only in a top-down bitmap */
++        int first_row = top_down ? src_y : (int)bitmap->y - (src_y + height);
++        uint32_t chunk = 0;
++        size_t chunk_start = 0;
++
++        if (src_x < 0 || src_x + width > (int)bitmap->x ||
++            first_row < 0 || first_row + height > (int)bitmap->y) {
++            ok = false;
++            break;
++        }
++        red::shared_ptr<RedImageItem> item(new (height * stride) RedImageItem());
++        item->surface_id = drawable->surface->id;
++        item->image_format = bitmap->format;
++        item->image_flags = copy->src_bitmap->descriptor.flags & SPICE_IMAGE_FLAGS_HIGH_BITS_SET;
++        item->pos.x = r->left;
++        item->pos.y = r->top;
++        item->width = width;
++        item->height = height;
++        item->stride = stride;
++        item->top_down = top_down;
++        item->can_lossy = FALSE;
++        for (int row = 0; ok && row < height; row++) {
++            ok = chunks_copy(bitmap->data, &chunk, &chunk_start,
++                             (size_t)(first_row + row) * bitmap->stride + (size_t)src_x * bpp,
++                             item->data + (size_t)row * stride, stride);
++        }
++        items[i] = item;
++    }
++    g_free(rects);
++    *num_items = num_rects;
++    return ok;
++}
++
++/* The part of copy->src_area that is the stream's area, if drawable can be split:
++ * see STREAM_STRIP_MAX_RECTS. */
++static bool red_stream_frame_crop(Drawable *drawable, const VideoStream *stream,
++                                  const VideoEncoder *encoder, SpiceRect *crop)
++{
++    RedDrawable *red_drawable = drawable->red_drawable.get();
++    SpiceCopy *copy = &red_drawable->u.copy;
++    const SpiceRect *bbox = &red_drawable->bbox;
++    const SpiceRect *dest = &stream->dest_area;
++    SpiceBitmap *bitmap = &copy->src_bitmap->u.bitmap;
++
++    if (encoder == nullptr || encoder->codec_type == SPICE_VIDEO_CODEC_TYPE_MJPEG ||
++        copy->mask.bitmap != nullptr || bitmap->palette != nullptr ||
++        bitmap_fmt_get_bytes_per_pixel(bitmap->format) < 2 ||
++        !rect_contains(bbox, dest) ||
++        /* no scaling, from the bitmap to the drawable or to the stream */
++        bbox->right - bbox->left != copy->src_area.right - copy->src_area.left ||
++        bbox->bottom - bbox->top != copy->src_area.bottom - copy->src_area.top ||
++        dest->right - dest->left != stream->width ||
++        dest->bottom - dest->top != stream->height) {
++        return false;
++    }
++    crop->left = copy->src_area.left + (dest->left - bbox->left);
++    crop->top = copy->src_area.top + (dest->top - bbox->top);
++    crop->right = crop->left + stream->width;
++    crop->bottom = crop->top + stream->height;
++    return true;
++}
++
+ static bool red_marshall_stream_data(DisplayChannelClient *dcc,
+                                      SpiceMarshaller *base_marshaller,
+                                      Drawable *drawable)
+@@ -1713,13 +1850,26 @@
+                (copy->src_area.bottom - copy->src_area.top != stream->height) ||
+                !rect_is_equal(&drawable->red_drawable->bbox, &stream->dest_area);
+ 
++    int stream_id = display_channel_get_video_stream_id(display, stream);
++    VideoStreamAgent *agent = &dcc->priv->stream_agents[stream_id];
++    SpiceRect src_area = copy->src_area;
++    red::shared_ptr<RedImageItem> strip[STREAM_STRIP_MAX_RECTS];
++    uint32_t num_strip = 0;
++
++    if (is_sized && red_stream_frame_crop(drawable, stream, agent->video_encoder, &src_area)) {
++        if (red_stream_strip_items(drawable, stream, strip, &num_strip)) {
++            is_sized = FALSE;
++        } else {
++            src_area = copy->src_area;
++            num_strip = 0;
++        }
++    }
++
+     if (is_sized &&
+         !dcc->test_remote_cap(SPICE_DISPLAY_CAP_SIZED_STREAM)) {
+         return FALSE;
+     }
+ 
+-    int stream_id = display_channel_get_video_stream_id(display, stream);
+-    VideoStreamAgent *agent = &dcc->priv->stream_agents[stream_id];
+     VideoBuffer *outbuf;
+     /* workaround for vga streams */
+     frame_mm_time =  drawable->red_drawable->mm_time ?
+@@ -1729,9 +1879,17 @@
+           agent->video_encoder->encode_frame(agent->video_encoder,
+                                              frame_mm_time,
+                                              &copy->src_bitmap->u.bitmap,
+-                                             &copy->src_area, stream->top_down,
++                                             &src_area, stream->top_down,
+                                              drawable->red_drawable.get(),
+                                              &outbuf);
++    if (num_strip > 0 && ret != VIDEO_ENCODER_FRAME_UNSUPPORTED) {
++        /* next in line, before any later drawing over the same area, also when
++         * the frame itself is dropped */
++        spice_debug("stream %d: sized frame split, %u images besides", stream_id, num_strip);
++        for (uint32_t i = 0; i < num_strip; i++) {
++            dcc->pipe_add_tail(std::move(strip[i]));
++        }
++    }
+     switch (ret) {
+     case VIDEO_ENCODER_FRAME_DROP:
+ #ifdef STREAM_STATS
+@@ -2046,6 +2204,9 @@
+     compress_send_data_t comp_send_data = {nullptr};
+ 
+     int comp_succeeded = dcc_compress_image(dcc, &red_image, &bitmap, nullptr, item->can_lossy, &comp_send_data);
++    spice_debug("image %dx%d at (%d, %d): %u bytes", item->width, item->height,
++                item->pos.x, item->pos.y,
++                comp_succeeded ? comp_send_data.comp_buf_size : bitmap.y * bitmap.stride);
+ 
+     surface_lossy_region = &dcc->priv->surface_client_lossy_region[item->surface_id];
+     if (comp_succeeded) {

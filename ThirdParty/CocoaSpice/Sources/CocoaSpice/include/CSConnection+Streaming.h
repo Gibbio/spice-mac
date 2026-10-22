@@ -96,6 +96,12 @@ typedef NS_ENUM(NSInteger, CSVideoCodec) {
 /// `SPICE_STREAM_PLAYOUT_MS` (default 50). Applied like `preferredVideoCodecs`.
 @property (atomic) NSInteger streamPlayoutDelay;
 
+/// Whether video follows the audio while it plays (in step with the sound, as
+/// late as it is heard) rather than staying `streamPlayoutDelay` after arrival:
+/// 1 yes, 0 no, a negative value keeps `SPICE_STREAM_AUDIO_SYNC` (default yes).
+/// Applied like `streamPlayoutDelay`.
+@property (atomic) NSInteger streamAudioSync;
+
 /// Whether the guest may record from the Mac's microphone (CoreAudio backend
 /// only). Default NO: the guest can start recording at any time, and gets
 /// nothing while this is off. Applies at once.

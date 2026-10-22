@@ -34,14 +34,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   once: the server restarts its streams with the new codec, and the next frame
   takes the new delay. `SPICE_PREFERRED_VIDEO_CODECS` and
   `SPICE_STREAM_PLAYOUT_MS` at launch override them.
+- **Connection ▸ Sync Video to Audio**, off by default, also applied at once. On,
+  video follows the audio while sound plays, in step with it, and so as late as
+  it is heard (~85 ms on the Mac's own output, ~280 ms with AirPods), with a pause
+  when the audio takes over and whenever the output device changes. Off, the
+  video keeps its Video Delay whatever plays and the sound comes a little after
+  it: desktop sound is mostly short alerts. `SPICE_STREAM_AUDIO_SYNC` at launch
+  overrides it (spice-gtk patch 0020).
 - **Native audio (CoreAudio)** instead of GStreamer's output: sound is 60–130 ms
   behind the guest instead of ~220 ms, and plays through the system's default
   output unit, which follows the Mac's output device when it changes (headphones,
-  AirPods). With a continuous tone in the guest the video, which follows the audio
-  then, was shown 69 ms after arrival instead of 225 ms, with 4 late frames
-  instead of 25. The buffer adapts to the pauses of up to ~130 ms that the audio
-  stream has on the Mac's Wi-Fi: over 15 min, two dropouts in the first minute and
-  none after (a fixed buffer: 11 in 18 min).
+  AirPods). With a continuous tone in the guest the video, following the audio
+  (Sync Video to Audio, above), was shown 69 ms after arrival instead of 225 ms,
+  with 4 late frames instead of 25. The buffer adapts to the pauses of up to
+  ~130 ms that the audio stream has on the Mac's Wi-Fi: over 15 min, two dropouts
+  in the first minute and none after (a fixed buffer: 11 in 18 min).
 - **Connection ▸ Share Microphone with VM**, off by default: until it is on, a VM
   that records gets no sound, and SpiceMac never opens the Mac's microphone.
 - **Drag files onto the window to copy them into the VM**, through its SPICE
@@ -67,9 +74,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Video no longer lags 400 ms behind the guest** unless it is playing sound:
   streamed frames are shown ~50 ms after they arrive (Connection ▸ Video Delay,
   or `SPICE_STREAM_PLAYOUT_MS`, where `0` restores the stock behaviour). Click to the client's framebuffer in our LAN
-  test: a median 154 ms instead of ~500 ms, with the same smoothness. Sounds
-  shorter than a few seconds (notifications) leave its timing alone; longer ones
-  hand it back to the server's timing, lined up with the audio, 3–4 s in. With
+  test: a median 154 ms instead of ~500 ms, with the same smoothness. With Sync
+  Video to Audio on (above), sounds longer than a few seconds hand it back to the
+  audio's timing, 3–4 s in; shorter ones (notifications) leave it alone. With
   spice-server 0.16 and later, which leave the playout delay to the client, the
   stream reports give the delay frames really get: reporting them late made the
   server cut MJPEG to ~8 fps and ~1 Mbit/s.

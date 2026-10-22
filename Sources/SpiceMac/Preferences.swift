@@ -80,11 +80,27 @@ extension Preferences {
         }
     }
 
-    /// SPICE_PREFERRED_VIDEO_CODECS / SPICE_STREAM_PLAYOUT_MS in the launch
-    /// environment take precedence over the two settings above (for testing); the
-    /// menu items are disabled then.
+    private static let syncVideoToAudioKey = "SyncVideoToAudio"
+
+    /// Whether video follows the audio while it plays: in step with the sound,
+    /// and so as late as it is heard (~85 ms on the built-in output, ~280 with
+    /// AirPods), pausing when the output device changes. Default off: desktop
+    /// sound is mostly short alerts, and video then stays `videoDelay` after
+    /// arrival, the sound coming after it. Applies like `preferH264Video`.
+    static var syncVideoToAudio: Bool {
+        get { UserDefaults.standard.bool(forKey: syncVideoToAudioKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: syncVideoToAudioKey)
+            NotificationCenter.default.post(name: .videoSettingsChanged, object: nil)
+        }
+    }
+
+    /// SPICE_PREFERRED_VIDEO_CODECS / SPICE_STREAM_PLAYOUT_MS /
+    /// SPICE_STREAM_AUDIO_SYNC in the launch environment take precedence over the
+    /// three settings above (for testing); the menu items are disabled then.
     static let videoCodecsFromEnvironment = ProcessInfo.processInfo.environment["SPICE_PREFERRED_VIDEO_CODECS"] != nil
     static let videoDelayFromEnvironment = ProcessInfo.processInfo.environment["SPICE_STREAM_PLAYOUT_MS"] != nil
+    static let audioSyncFromEnvironment = ProcessInfo.processInfo.environment["SPICE_STREAM_AUDIO_SYNC"] != nil
 
     private static let shareMicrophoneKey = "ShareMicrophone"
 

@@ -45,6 +45,7 @@
 // spice-mac: storage for CSConnection (Streaming)
 @property (atomic, copy, nullable) NSArray<NSNumber *> *videoCodecsSetting;
 @property (atomic) NSInteger playoutDelaySetting;
+@property (atomic) NSInteger audioSyncSetting;
 @property (atomic) BOOL microphoneSetting;
 // spice-mac (multi-monitor): a config to send once every display's state is known
 @property (nonatomic) BOOL monitorConfigPending;
@@ -394,6 +395,7 @@ static void cs_apply_video_settings(CSConnection *self, SpiceChannel *channel,
 {
     NSArray<NSNumber *> *codecs = self.videoCodecsSetting;
     NSInteger delay = self.playoutDelaySetting;
+    NSInteger audioSync = self.audioSyncSetting;
 
     if (applyCodecs && codecs.count > 0) {
         gint types[SPICE_VIDEO_CODEC_TYPE_ENUM_END];
@@ -412,6 +414,9 @@ static void cs_apply_video_settings(CSConnection *self, SpiceChannel *channel,
     }
     if (applyPlayout && delay >= 0) {
         spice_display_channel_set_stream_playout(channel, (gint)delay);
+    }
+    if (applyPlayout && audioSync >= 0) {
+        spice_display_channel_set_stream_audio_sync(channel, audioSync > 0);
     }
 }
 
@@ -714,6 +719,7 @@ end:
 - (void)finishInit {
     SPICE_DEBUG("[CocoaSpice] %s:%d", __FUNCTION__, __LINE__);
     self.playoutDelaySetting = -1; // spice-mac: see CSConnection (Streaming)
+    self.audioSyncSetting = -1;
     g_signal_connect(self.spiceSession, "channel-new",
                      G_CALLBACK(cs_channel_new), (__bridge void *)self);
     g_signal_connect(self.spiceSession, "channel-destroy",
@@ -819,6 +825,15 @@ end:
 
 - (void)setStreamPlayoutDelay:(NSInteger)milliseconds {
     self.playoutDelaySetting = milliseconds;
+    [self applyVideoSettingsToOpenDisplaysWithCodecs:NO playout:YES];
+}
+
+- (NSInteger)streamAudioSync {
+    return self.audioSyncSetting;
+}
+
+- (void)setStreamAudioSync:(NSInteger)sync {
+    self.audioSyncSetting = sync;
     [self applyVideoSettingsToOpenDisplaysWithCodecs:NO playout:YES];
 }
 

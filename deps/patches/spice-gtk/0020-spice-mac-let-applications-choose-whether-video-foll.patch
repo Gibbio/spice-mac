@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Er Gibbio <gibbio@pm.me>
+Date: Thu, 22 Oct 2026 09:06:34 +0200
+Subject: [PATCH 20/20] spice-mac: let applications choose whether video
+ follows the audio
+
+Once audio has played for a couple of seconds, video follows the audio
+clock, for lip sync: it is then as late as the sound is heard (~85 ms on a
+Mac's built-in output, ~280 ms with AirPods) and pauses or skips when the
+output device changes. For a desktop, whose sound is mostly short alerts,
+an application may rather keep video at its low playout delay always.
+
+spice_display_channel_set_stream_audio_sync() turns that on (the default)
+or off, at once; SPICE_STREAM_AUDIO_SYNC=0 turns it off from the start.
+---
+ src/channel-display.c | 37 ++++++++++++++++++++++++++++++++++---
+ src/channel-display.h |  2 ++
+ src/map-file-glib     |  1 +
+ 3 files changed, 37 insertions(+), 3 deletions(-)
+
+diff --git a/src/channel-display.c b/src/channel-display.c
+index 5b0b75d..ea9f7b4 100644
+--- a/src/channel-display.c
++++ b/src/channel-display.c
+@@ -89,6 +89,7 @@ struct _SpiceDisplayChannelPrivate {
+     /* low-latency playout, see display_playout_mode() */
+     gint32                      playout_target;
+     gboolean                    playout_audio;      /* video follows the session (audio) clock */
++    gboolean                    playout_audio_sync; /* the audio may take charge of the video */
+     gint64                      playout_audio_since;
+     gboolean                    playout_based;
+     guint32                     playout_base;       /* own clock = monotonic ms + base */
+@@ -1143,6 +1144,8 @@ static void spice_display_channel_init(SpiceDisplayChannel *channel)
+      * no audio is playing (0 = always follow the server's timestamps) */
+     const gchar *playout = g_getenv("SPICE_STREAM_PLAYOUT_MS");
+     c->playout_target = playout != NULL ? atoi(playout) : PLAYOUT_DEFAULT_MS;
++    /* SPICE_STREAM_AUDIO_SYNC=0: video never follows the audio clock */
++    c->playout_audio_sync = g_strcmp0(g_getenv("SPICE_STREAM_AUDIO_SYNC"), "0") != 0;
+ }
+ 
+ /* ------------------------------------------------------------------ */
+@@ -2011,8 +2014,9 @@ static void display_reschedule_streams(SpiceChannel *channel)
+  * server re-sends its own at the end of playback, and frames queued against it
+  * would be dropped or held each time.
+  *
+- * The audio is in charge once the backend has reported its delay and playback
+- * has lasted PLAYOUT_AUDIO_HOLD more: from then on video follows the session clock
++ * The audio is in charge (unless spice_display_channel_set_stream_audio_sync()
++ * turned that off) once the backend has reported its delay and playback has
++ * lasted PLAYOUT_AUDIO_HOLD more: from then on video follows the session clock
+  * and the server's timestamps, for lip sync, after one pause of about the audio
+  * delay. Short sounds — notifications — never get there. When the audio stops,
+  * the own clock continues from the session's and the shift is measured again:
+@@ -2031,7 +2035,7 @@ static void display_playout_mode(SpiceChannel *channel)
+     if (c->playout_target <= 0) {
+         return;
+     }
+-    audio = spice_session_is_playback_active(session) &&
++    audio = c->playout_audio_sync && spice_session_is_playback_active(session) &&
+             spice_session_get_playback_latency(session) > 0;
+     if (!audio) {
+         c->playout_audio_since = 0;
+@@ -2129,6 +2133,33 @@ void spice_display_channel_set_stream_playout(SpiceChannel *channel, gint delay_
+     }
+ }
+ 
++/**
++ * spice_display_channel_set_stream_audio_sync:
++ * @channel: a #SpiceDisplayChannel
++ * @sync: whether video follows the audio while it plays
++ *
++ * With @sync (the default, unless SPICE_STREAM_AUDIO_SYNC=0), once audio has
++ * played for a couple of seconds video is shown in step with it, as late as the
++ * sound is heard; without, video stays `delay_ms` after arrival (see
++ * spice_display_channel_set_stream_playout()) and the sound comes after it.
++ * Applies at once. Call it from the main context. A spice-mac addition.
++ */
++void spice_display_channel_set_stream_audio_sync(SpiceChannel *channel, gboolean sync)
++{
++    SpiceDisplayChannelPrivate *c;
++
++    g_return_if_fail(SPICE_IS_DISPLAY_CHANNEL(channel));
++    c = SPICE_DISPLAY_CHANNEL(channel)->priv;
++    sync = !!sync;
++    if (sync == c->playout_audio_sync) {
++        return;
++    }
++    CHANNEL_DEBUG(channel, "playout: %s the audio", sync ? "follow" : "do not follow");
++    c->playout_audio_sync = sync;
++    c->playout_audio_since = 0;
++    display_playout_mode(channel);
++}
++
+ /**
+  * spice_display_channel_get_stream_stats:
+  * @channel: a #SpiceDisplayChannel
+diff --git a/src/channel-display.h b/src/channel-display.h
+index f27ba35..7e2bd39 100644
+--- a/src/channel-display.h
++++ b/src/channel-display.h
+@@ -220,6 +220,8 @@ guint spice_display_channel_get_stream_stats(SpiceChannel *channel, SpiceDisplay
+                                              guint max_stats);
+ SPICE_GTK_AVAILABLE_IN_0_43
+ void spice_display_channel_set_stream_playout(SpiceChannel *channel, gint delay_ms);
++SPICE_GTK_AVAILABLE_IN_0_43
++void spice_display_channel_set_stream_audio_sync(SpiceChannel *channel, gboolean sync);
+ 
+ SPICE_GTK_AVAILABLE_IN_0_31
+ GType           spice_gl_scanout_get_type     (void);
+diff --git a/src/map-file-glib b/src/map-file-glib
+index 48d08e7..af98129 100644
+--- a/src/map-file-glib
++++ b/src/map-file-glib
+@@ -33,6 +33,7 @@ spice_display_channel_get_primary;
+ spice_display_channel_get_stream_stats;
+ spice_display_channel_get_type;
+ spice_display_channel_gl_draw_done;
++spice_display_channel_set_stream_audio_sync;
+ spice_display_channel_set_stream_playout;
+ spice_display_get_gl_scanout;
+ spice_display_get_primary;
+-- 
+2.56.0
+

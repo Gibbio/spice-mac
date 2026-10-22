@@ -80,6 +80,16 @@ public final class SpiceClient: NSObject, ObservableObject {
         }
     }
 
+    /// Whether video follows the audio while it plays (in step with the sound)
+    /// rather than staying `streamPlayoutDelay` after arrival; nil keeps
+    /// `SPICE_STREAM_AUDIO_SYNC` (default yes). Applies at once.
+    public var streamAudioSync: Bool? {
+        didSet {
+            guard streamAudioSync != oldValue else { return }
+            connection?.streamAudioSync = streamAudioSync.map { $0 ? 1 : 0 } ?? -1
+        }
+    }
+
     private let parameters: SpiceConnectionParameters
     private let pasteboard: SpicePasteboardBridge
     /// Whether a connection attempt has already been made. The Proxmox ticket is
@@ -161,6 +171,9 @@ public final class SpiceClient: NSObject, ObservableObject {
         }
         if let streamPlayoutDelay {
             conn.streamPlayoutDelay = streamPlayoutDelay
+        }
+        if let streamAudioSync {
+            conn.streamAudioSync = streamAudioSync ? 1 : 0
         }
 
         // Clipboard sharing (opt-out; requires the guest vdagent to take effect).

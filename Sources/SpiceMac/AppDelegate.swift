@@ -68,6 +68,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         Preferences.preferH264Video.toggle()
     }
 
+    @objc func toggleSyncVideoToAudio(_ sender: NSMenuItem) {
+        Preferences.syncVideoToAudio.toggle()
+    }
+
     @objc func setVideoDelay(_ sender: NSMenuItem) {
         guard let delay = VideoDelay(rawValue: sender.tag) else { return }
         Preferences.videoDelay = delay
@@ -93,6 +97,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case #selector(togglePreferH264Video(_:)):
             menuItem.state = Preferences.preferH264Video ? .on : .off
             return !Preferences.videoCodecsFromEnvironment
+        case #selector(toggleSyncVideoToAudio(_:)):
+            menuItem.state = Preferences.syncVideoToAudio ? .on : .off
+            return !Preferences.audioSyncFromEnvironment
         case #selector(setVideoDelay(_:)):
             menuItem.state = menuItem.tag == Preferences.videoDelay.rawValue ? .on : .off
             return !Preferences.videoDelayFromEnvironment

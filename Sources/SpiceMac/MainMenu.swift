@@ -82,6 +82,12 @@ enum MainMenu {
             + "otherwise it keeps sending MJPEG."
         connMenu.addItem(preferH264)
         connMenu.addItem(videoDelayMenuItem())
+        let syncToAudio = NSMenuItem(title: "Sync Video to Audio",
+                                     action: #selector(AppDelegate.toggleSyncVideoToAudio(_:)), keyEquivalent: "")
+        syncToAudio.toolTip = "While sound plays, show the video in step with it, as late as it is heard "
+            + "(~85 ms on the Mac's output, ~280 ms with AirPods), for films and calls. "
+            + "Off, the video keeps its Video Delay and the sound comes after it. Applies at once."
+        connMenu.addItem(syncToAudio)
         connMenu.addItem(.separator())
         // USB submenu, populated dynamically by the window controller.
         let usbItem = NSMenuItem(title: "USB Devices", action: nil, keyEquivalent: "")

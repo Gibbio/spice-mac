@@ -104,13 +104,14 @@ logged once a second, in two parts:
 
 ## Video settings and statistics (spice-mac additions)
 
-For SpiceMac's Connection ▸ Prefer H.264 Video / Video Delay and View ▸ Show
-Statistics, on top of spice-gtk patches 0010 (the codec preference is held until
-the server's first MARK) and 0012 (the playout setter and the statistics getters):
+For SpiceMac's Connection ▸ Prefer H.264 Video / Video Delay / Sync Video to Audio
+and View ▸ Show Statistics, on top of spice-gtk patches 0010 (the codec preference
+is held until the server's first MARK), 0012 (the playout setter and the
+statistics getters) and 0020 (the audio-sync setter):
 
 - **`Sources/CocoaSpice/include/CSConnection+Streaming.h`** (in the umbrella
-  header), implemented in **`CSConnection.m`** — `preferredVideoCodecs` and
-  `streamPlayoutDelay`, applied to each display channel when it opens
+  header), implemented in **`CSConnection.m`** — `preferredVideoCodecs`,
+  `streamPlayoutDelay` and `streamAudioSync`, applied to each display channel when it opens
   (`cs_display_channel_event`) and at once to the open ones; `microphoneEnabled`,
   the CoreAudio backend's `record-enabled` (patch 0013), set when the audio is
   created (`cs_apply_microphone_setting`) and on every change;

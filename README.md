@@ -221,12 +221,17 @@ click reached the client's framebuffer in a median 154 ms, against ~500 ms stock
 (median 128 ms in that test), 50 ms (the default) or 80 ms (185 ms).
 `SPICE_STREAM_PLAYOUT_MS` at launch overrides it, and `0` restores the stock
 behaviour.
-Sounds shorter than a few seconds, such as notifications, leave the video's timing
-alone. Longer ones hand the video back to the server's timing, lined up with the
-audio: some 3–4 s into the sound, after a single pause of about the audio's delay.
-With the CoreAudio output (below) that is 60–130 ms: a continuous tone in the
-guest had video shown 69 ms after arrival, against 225 ms with the GStreamer output
-SpiceMac used before.
+**Connection ▸ Sync Video to Audio** (off by default) decides what happens while
+the guest plays sound. Off, the video keeps its delay and the sound comes a little
+after it, by the audio's delay (below) less the video's: unnoticeable with the
+short alerts that make up most of a desktop's sound. On, for films and calls,
+sounds longer than a few seconds hand the video to the audio's timing, in step
+with it: some 3–4 s into the sound, after a single pause of about the audio's
+delay, and again whenever the output device changes. That delay is 60–130 ms on
+the Mac's own output (a continuous tone in the guest had video shown 69 ms after
+arrival, against 225 ms with the GStreamer output SpiceMac used before) and
+~280 ms with AirPods. It applies at once; `SPICE_STREAM_AUDIO_SYNC=0` or `=1` at
+launch overrides it.
 
 **Statistics.** **View ▸ Show Statistics** (⌃⌘I) lays a panel over the display,
 refreshed once a second:

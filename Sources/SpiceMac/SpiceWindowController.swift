@@ -250,6 +250,9 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
         if !Preferences.videoDelayFromEnvironment {
             client.streamPlayoutDelay = Preferences.videoDelay.rawValue
         }
+        if !Preferences.audioSyncFromEnvironment {
+            client.streamAudioSync = Preferences.syncVideoToAudio
+        }
     }
 
     // MARK: - Statistics overlay

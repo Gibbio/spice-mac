@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Er Gibbio <gibbio@pm.me>
+Date: Wed, 21 Oct 2026 22:08:16 +0200
+Subject: [PATCH 19/19] display, vt: show frames up to 100 ms late while video
+ follows the audio
+
+Following the audio clock, a frame has only the audio's delay to arrive in
+(~85 ms on the built-in output), and on Wi-Fi some come later: a couple of
+seconds of frames 50-116 ms late were dropped, each a skip, and reported as
+drops, for which spice-server's GStreamer rate control halved the bit rate
+four times in two seconds. While the audio is in charge, the VideoToolbox
+decoder now shows a frame up to 100 ms late, a little out of step with the
+sound for a moment, and the server is told its margin was 0 rather than of
+a drop. Later than that, frames are dropped and reported as before.
+---
+ src/channel-display-priv.h |  1 +
+ src/channel-display-vt.c   |  3 ++-
+ src/channel-display.c      | 20 ++++++++++++++++++++
+ 3 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/src/channel-display-priv.h b/src/channel-display-priv.h
+index 4b21dd6..75771ab 100644
+--- a/src/channel-display-priv.h
++++ b/src/channel-display-priv.h
+@@ -213,6 +213,7 @@ static const struct {
+ G_STATIC_ASSERT(G_N_ELEMENTS(gst_opts) <= SPICE_VIDEO_CODEC_TYPE_ENUM_END);
+ 
+ guint32 stream_get_time(display_stream *st);
++guint32 stream_get_late_tolerance(display_stream *st);
+ void stream_dropped_frame_on_playback(display_stream *st);
+ #define SPICE_UNKNOWN_STRIDE 0
+ void stream_display_frame(display_stream *st, SpiceFrame *frame, uint32_t width, uint32_t height, int stride, uint8_t* data);
+diff --git a/src/channel-display-vt.c b/src/channel-display-vt.c
+index 360c104..5655a95 100644
+--- a/src/channel-display-vt.c
++++ b/src/channel-display-vt.c
+@@ -401,7 +401,8 @@ static void vt_decoder_schedule(VTDecoder *decoder)
+     do {
+         if (picture != NULL) {
+             gint32 late = spice_mmtime_diff(time, picture->frame->mm_time);
+-            if (late <= VT_LATE_TOLERANCE_MS) {
++            if (late <= (gint32)MAX(VT_LATE_TOLERANCE_MS,
++                                    stream_get_late_tolerance(decoder->base.stream))) {
+                 decoder->cur = picture;
+                 decoder->timer_id = g_spice_timeout_add(late < 0 ? -late : 0,
+                                                         vt_decoder_display_picture, decoder);
+diff --git a/src/channel-display.c b/src/channel-display.c
+index 0ebdb70..5b0b75d 100644
+--- a/src/channel-display.c
++++ b/src/channel-display.c
+@@ -66,6 +66,9 @@
+ 
+ /* SPICE_STREAM_PLAYOUT_MS's default: see display_playout_shift() */
+ #define PLAYOUT_DEFAULT_MS 50
++/* How late a frame may still be shown while video follows the audio: see
++ * stream_get_late_tolerance() */
++#define PLAYOUT_AUDIO_LATE_MS 100
+ 
+ struct _SpiceDisplayChannelPrivate {
+     GHashTable                  *surfaces;
+@@ -1645,6 +1648,19 @@ guint32 stream_get_time(display_stream *st)
+     return monotonic_ms() + c->playout_base;
+ }
+ 
++/* How many ms past its time a decoder may still show a frame, rather than drop
++ * it. While video follows the audio clock, a frame has only the audio's delay
++ * (~85 ms on the built-in output) to arrive in, and on Wi-Fi some come later:
++ * shown a little out of step with the sound for a moment, they are not the
++ * skip a dropped frame is (and, reported, a halved bit rate on the server). */
++G_GNUC_INTERNAL
++guint32 stream_get_late_tolerance(display_stream *st)
++{
++    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(st->channel)->priv;
++
++    return c->playout_target > 0 && c->playout_audio ? PLAYOUT_AUDIO_LATE_MS : 0;
++}
++
+ /* coroutine or main context */
+ G_GNUC_INTERNAL
+ void stream_dropped_frame_on_playback(display_stream *st)
+@@ -2217,6 +2233,10 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+         server_margin = MAX(margin_report, MIN(margin - c->playout_target, 0) + PLAYOUT_DEFAULT_MS);
+     } else {
+         server_margin = MIN(MAX(margin_report, margin), PLAYOUT_DEFAULT_MS);
++        /* a frame late by no more than the decoder still shows is no drop */
++        if (server_margin < 0 && -server_margin <= (gint32)stream_get_late_tolerance(st)) {
++            server_margin = 0;
++        }
+     }
+     margin_report = MAX(margin_report, margin);
+     if (margin > 0) {
+-- 
+2.56.0
+

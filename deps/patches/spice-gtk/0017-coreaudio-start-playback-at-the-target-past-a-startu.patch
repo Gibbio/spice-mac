@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Er Gibbio <gibbio@pm.me>
+Date: Wed, 21 Oct 2026 21:59:39 +0200
+Subject: [PATCH 17/17] coreaudio: start playback at the target, past a startup
+ burst
+
+When playback starts, the server sends the audio it has queued at once,
+while the output unit is still being set up: the ring then held ~480 ms
+instead of the ~90 ms target, and the sound ran that late until the
+once-a-second skip caught up. The delay reported meanwhile (650-670 ms with
+AirPods) also reached spice-server's GStreamer rate control as the stream's
+best video and audio margin, and every later report (~280 ms) then read as
+half of it: it lowered the bit rate report after report and dropped frames
+itself. More than the target (plus the skip slack) buffered when the output
+(re)starts is now skipped there and then.
+---
+ src/spice-coreaudio.c | 23 +++++++++++++++++++++--
+ 1 file changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/src/spice-coreaudio.c b/src/spice-coreaudio.c
+index 6e48fce..68c6e31 100644
+--- a/src/spice-coreaudio.c
++++ b/src/spice-coreaudio.c
+@@ -30,8 +30,11 @@
+  * time the output runs dry anyway; after every 5 calm minutes it shrinks by
+  * 10 ms, down to where it started. Audio that stays buffered beyond the
+  * target for a whole second (after a burst, or as the guest's and the Mac's
+- * clocks drift) is skipped, so the delay does not grow. The delay reported to
+- * the session is what is really buffered plus the output device's own latency.
++ * clocks drift) is skipped, so the delay does not grow; more than the target
++ * buffered when the output (re)starts — the audio the server sends at once when
++ * playback starts, while the unit is still being set up — is skipped then and
++ * there. The delay reported to the session is what is really buffered plus the
++ * output device's own latency.
+  *
+  * CoreAudio calls that can block — starting, stopping and creating units and
+  * queues, which waits for the device — run on a serial dispatch queue, not on
+@@ -538,6 +541,22 @@ static void playback_data(SpicePlaybackChannel *channel, gpointer *audio, gint s
+ 
+     if (atomic_load(&pb->starved) && atomic_load(&pb->configuring) == 0 &&
+         used >= atomic_load(&pb->target)) {
++        guint target = atomic_load(&pb->target);
++        guint frame_bytes = atomic_load(&pb->frame_bytes);
++        guint slack = SKIP_SLACK_MS * atomic_load(&pb->rate) / 1000 * frame_bytes;
++
++        /* Start from the newest `target`: a startup burst left in the ring
++         * delayed the sound by ~0.5 s for a second, and that delay, reported,
++         * made spice-server's rate control judge every later margin as half of
++         * what the stream had had, and lower the video bit rate for good. */
++        if (frame_bytes > 0 && used > target + slack) {
++            guint64 skip = used - target;
++            skip -= skip % frame_bytes;
++            atomic_store(&pb->flush_to, w + size - (used - skip));
++            atomic_fetch_add(&pb->skipped, (guint)skip);
++            used -= skip;
++            SPICE_DEBUG("coreaudio: starting %u ms in, past a burst", bytes_to_ms(pb, (guint)skip));
++        }
+         atomic_store(&pb->starved, FALSE);
+         if (!pb->delay_reported) {
+             /* the delay is known from now on: before, it would read as if the
+-- 
+2.56.0
+

@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Er Gibbio <gibbio@pm.me>
+Date: Wed, 21 Oct 2026 22:03:27 +0200
+Subject: [PATCH 18/18] display: cap the reported margin while video follows
+ the audio, not for MJPEG
+
+Following the audio clock, a stream's margin is about the audio's delay,
+which changes with the output device (~280 ms with AirPods, ~130 with the
+built-in output) and peaks for a moment when it does. spice-server's
+GStreamer rate control took the 408 ms of a switch from AirPods to the
+built-in output as the stream's best margin and lowered the bit rate 115
+times in a minute against the 131 ms after it, dropping frames itself.
+Report at most the default 50 ms there too.
+
+MJPEG streams go back to the margins as they were before the cap (0011):
+spice-server's MJPEG rate control is different, asks the client for a
+longer delay whenever the margin is below about two frames, and was fine
+with them.
+---
+ src/channel-display.c | 35 +++++++++++++++++++++++------------
+ 1 file changed, 23 insertions(+), 12 deletions(-)
+
+diff --git a/src/channel-display.c b/src/channel-display.c
+index 7aeb4bc..0ebdb70 100644
+--- a/src/channel-display.c
++++ b/src/channel-display.c
+@@ -2195,18 +2195,29 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+      * clock they set up, newer ones the delay the frame really gets, rather than a
+      * client that seems unable to keep up: their rate control cuts the stream
+      * whenever the reported delay is below -15 ms (to ~1 Mbit/s in our test). */
+-    /* On its own clock, a frame is shown `target` ms after arrival, whatever
+-     * its slack, so tell the server the margin the default target would give,
+-     * and no more: a viewer's choice of target (Video Delay) and a frame that
+-     * came early are no news for its rate control, which judges each report
+-     * against the largest margin the stream has had and lowers the bit rate,
+-     * report after report, while margins stay below half of it. Uncapped,
+-     * ~150 ms during a stream's first second, then 50, took H.264 streams to
+-     * ~0.1 Mbit/s and 3 fps within a minute; after a change from 80 to 30 ms
+-     * it halved the bit rate. A frame arriving late still lowers the margin. */
+-    server_margin = (c->playout_target > 0 && !c->playout_audio) ?
+-        MAX(margin_report, MIN(margin - c->playout_target, 0) + PLAYOUT_DEFAULT_MS) :
+-        MAX(margin_report, margin);
++    /* spice-server's GStreamer rate control (H.264...) judges each report
++     * against the largest margin the stream has had, and lowers the bit rate,
++     * report after report, while margins stay below half of it. So tell it the
++     * margin the default target would give, and no more:
++     * - on its own clock, a frame is shown `target` ms after arrival, whatever
++     *   its slack: a viewer's choice of target (Video Delay) and a frame that
++     *   came early are no news. Uncapped, ~150 ms during a stream's first
++     *   second, then 50, took H.264 to ~0.1 Mbit/s and 3 fps within a minute;
++     *   a change from 80 to 30 ms halved the bit rate;
++     * - following the audio, the margin is about the audio's delay, which
++     *   changes with the output device (~280 ms with AirPods, ~130 built in)
++     *   and peaks for a moment when it does: from 408 to 131 ms, the server
++     *   lowered the bit rate 115 times in a minute.
++     * A frame arriving late still lowers the margin. MJPEG streams keep the
++     * margins as they are: the server's MJPEG rate control works differently,
++     * and asks for a longer delay when the margin is below two frames. */
++    if (st->video_decoder->codec_type == SPICE_VIDEO_CODEC_TYPE_MJPEG) {
++        server_margin = MAX(margin_report, margin);
++    } else if (c->playout_target > 0 && !c->playout_audio) {
++        server_margin = MAX(margin_report, MIN(margin - c->playout_target, 0) + PLAYOUT_DEFAULT_MS);
++    } else {
++        server_margin = MIN(MAX(margin_report, margin), PLAYOUT_DEFAULT_MS);
++    }
+     margin_report = MAX(margin_report, margin);
+     if (margin > 0) {
+         SpiceSession *s = spice_channel_get_session(channel);
+-- 
+2.56.0
+

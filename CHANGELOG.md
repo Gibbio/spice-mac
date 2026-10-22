@@ -98,6 +98,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (~150 ms in a stream's first second), or halved it when the delay was turned
   down. The margin reported now is the default delay's, at most 50 ms; a late
   frame still lowers it (spice-gtk patch 0016).
+- **H.264 with sound playing fell to a few fps** in the same way, while the video
+  followed the audio. The sound started ~480 ms late, past the audio the server
+  sends at once when playback starts, and the delay reported then (650–670 ms
+  with AirPods) became the stream's best margin: every later report looked like
+  half of it. A change of output device did the same (408 ms for a moment), and
+  on Wi-Fi a few frames arrived 50–116 ms late, each dropped and reported as a
+  drop, which halves the bit rate. Now playback starts at its target, skipping
+  that burst (patch 0017); the margin reported while video follows the audio is
+  capped at 50 ms too, except for MJPEG, whose rate control was fine without
+  the cap (0018); and frames up to 100 ms late are shown then rather than dropped
+  (0019). With a continuous tone in the guest: 30.7 fps, no dropped frames, one
+  bit-rate cut.
 - **The VideoToolbox decoder dropped frames 1–9 ms late** (one every 2–3 s on
   the node's H.264), each a visible hitch and, reported to the server, a halved
   bit rate. Frames up to 15 ms late are now shown (patch 0015).

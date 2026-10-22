@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Er Gibbio <gibbio@pm.me>
 Date: Wed, 21 Oct 2026 15:43:35 +0200
-Subject: [PATCH 14/14] build: make GStreamer optional
+Subject: [PATCH 14/21] build: make GStreamer optional
 
 spice-gtk 0.43 requires GStreamer for its audio backend and its video
 decoders. On macOS, with the CoreAudio backend (0013), the built-in MJPEG
@@ -95,10 +95,10 @@ index 9abfad7..4b21dd6 100644
  VideoDecoder* create_vt_decoder(int codec_type, display_stream *stream);
  gboolean vtvideo_has_codec(int codec_type);
 diff --git a/src/channel-display.c b/src/channel-display.c
-index b40415f..605f9c7 100644
+index a27b504..8525dc9 100644
 --- a/src/channel-display.c
 +++ b/src/channel-display.c
-@@ -533,7 +533,11 @@ static void spice_display_channel_class_init(SpiceDisplayChannelClass *klass)
+@@ -531,7 +531,11 @@ static void spice_display_channel_class_init(SpiceDisplayChannelClass *klass)
                       g_cclosure_user_marshal_BOOLEAN__POINTER,
                       G_TYPE_BOOLEAN,
                       1,
@@ -110,7 +110,7 @@ index b40415f..605f9c7 100644
  
      channel_set_handlers(SPICE_CHANNEL_CLASS(klass));
  }
-@@ -1051,12 +1055,21 @@ static void spice_display_channel_set_capabilities(SpiceChannel *channel)
+@@ -1047,12 +1051,21 @@ static void spice_display_channel_set_capabilities(SpiceChannel *channel)
              continue;
          }
  #endif
@@ -132,7 +132,7 @@ index b40415f..605f9c7 100644
      }
  }
  
-@@ -1521,8 +1534,10 @@ static display_stream *display_stream_create(SpiceChannel *channel,
+@@ -1517,8 +1530,10 @@ static display_stream *display_stream_create(SpiceChannel *channel,
              break;
          }
  #endif
@@ -188,7 +188,7 @@ index 3fad53b..3944705 100644
    # Source files for spice-client-gtk
    #
 diff --git a/src/spice-audio.c b/src/spice-audio.c
-index d84fbee..551a8be 100644
+index 07051b2..4352408 100644
 --- a/src/spice-audio.c
 +++ b/src/spice-audio.c
 @@ -40,7 +40,9 @@
@@ -201,7 +201,7 @@ index d84fbee..551a8be 100644
  #ifdef HAVE_COREAUDIO
  #include "spice-coreaudio.h"
  #endif
-@@ -243,12 +245,16 @@ SpiceAudio *spice_audio_new_priv(SpiceSession *session, GMainContext *context,
+@@ -237,12 +239,16 @@ SpiceAudio *spice_audio_new_priv(SpiceSession *session, GMainContext *context,
          name = g_get_application_name();
  
  #ifdef HAVE_COREAUDIO
@@ -218,3 +218,6 @@ index d84fbee..551a8be 100644
      if (self != NULL) {
          spice_g_signal_connect_object(session, "notify::enable-audio", G_CALLBACK(session_enable_audio), self, 0);
          spice_g_signal_connect_object(session, "channel-new", G_CALLBACK(channel_new), self, G_CONNECT_AFTER);
+-- 
+2.56.0
+

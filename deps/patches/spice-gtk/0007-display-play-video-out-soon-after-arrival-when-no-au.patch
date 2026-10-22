@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: spice-mac <spice-mac@localhost>
 Date: Tue, 20 Oct 2026 09:08:32 +0200
-Subject: [PATCH 7/9] display: play video out soon after arrival when no audio
- is playing
+Subject: [PATCH 07/21] display: play video out soon after arrival when no
+ audio is playing
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -71,7 +71,7 @@ index 0bb35a0..0a1c5ec 100644
      gboolean report_is_active;
      uint32_t report_id;
 diff --git a/src/channel-display.c b/src/channel-display.c
-index bbc170d..0d7df71 100644
+index 47a6ddb..3262183 100644
 --- a/src/channel-display.c
 +++ b/src/channel-display.c
 @@ -16,6 +16,8 @@
@@ -100,7 +100,7 @@ index bbc170d..0d7df71 100644
      SpiceGlScanout              scanout_ret;
      SpiceGlScanout2             scanout;
  };
-@@ -1068,6 +1080,11 @@ static void spice_display_channel_init(SpiceDisplayChannel *channel)
+@@ -1063,6 +1075,11 @@ static void spice_display_channel_init(SpiceDisplayChannel *channel)
      } else {
          c->enable_adaptive_streaming = TRUE;
      }
@@ -112,7 +112,7 @@ index bbc170d..0d7df71 100644
  }
  
  /* ------------------------------------------------------------------ */
-@@ -1540,11 +1557,26 @@ static uint32_t spice_msg_in_frame_data(SpiceMsgIn *frame_msg, uint8_t **data)
+@@ -1536,11 +1553,26 @@ static uint32_t spice_msg_in_frame_data(SpiceMsgIn *frame_msg, uint8_t **data)
      }
  }
  
@@ -140,7 +140,7 @@ index bbc170d..0d7df71 100644
  }
  
  /* coroutine or main context */
-@@ -1559,6 +1591,33 @@ G_GNUC_INTERNAL
+@@ -1555,6 +1587,33 @@ G_GNUC_INTERNAL
  void stream_display_frame(display_stream *st, SpiceFrame *frame,
                            uint32_t width, uint32_t height, int stride, uint8_t *data)
  {
@@ -174,7 +174,7 @@ index bbc170d..0d7df71 100644
      if (stride == SPICE_UNKNOWN_STRIDE) {
          stride = width * sizeof(uint32_t);
      }
-@@ -1837,18 +1896,138 @@ void spice_frame_free(SpiceFrame *frame)
+@@ -1833,18 +1892,138 @@ void spice_frame_free(SpiceFrame *frame)
      g_free(frame);
  }
  
@@ -316,7 +316,7 @@ index bbc170d..0d7df71 100644
  
      if (spice_msg_in_type(in) == SPICE_MSG_DISPLAY_STREAM_DATA_SIZED) {
          CHANNEL_DEBUG(channel, "stream %u contains sized data", op->id);
-@@ -1859,7 +2038,11 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+@@ -1855,7 +2034,11 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
          op->multi_media_time = mmtime + 100; /* workaround... */
      }
  
@@ -329,7 +329,7 @@ index bbc170d..0d7df71 100644
      if (margin > 0) {
          SpiceSession *s = spice_channel_get_session(channel);
  
-@@ -1874,7 +2057,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+@@ -1870,7 +2053,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
       * decoding and best decide if/when to drop them when they are late,
       * taking into account the impact on later frames.
       */
@@ -339,10 +339,10 @@ index bbc170d..0d7df71 100644
          destroy_stream(channel, op->id);
          report_invalid_stream(channel, op->id);
 diff --git a/src/channel-playback.c b/src/channel-playback.c
-index aff84d4..b038acc 100644
+index dc53be0..e32bf03 100644
 --- a/src/channel-playback.c
 +++ b/src/channel-playback.c
-@@ -364,6 +364,7 @@ static void playback_handle_start(SpiceChannel *channel, SpiceMsgIn *in)
+@@ -362,6 +362,7 @@ static void playback_handle_start(SpiceChannel *channel, SpiceMsgIn *in)
      c->frame_count = 0;
      c->last_time = start->time;
      c->is_active = TRUE;
@@ -350,3 +350,6 @@ index aff84d4..b038acc 100644
      c->min_latency = SPICE_PLAYBACK_DEFAULT_LATENCY_MS;
      snd_codec_destroy(&c->codec);
  
+-- 
+2.56.0
+

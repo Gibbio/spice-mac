@@ -81,11 +81,11 @@ Every component is built from the upstream release pinned (URL + SHA-256) in
 deps/sources.lock, with the patches in deps/patches/ applied. At the time of
 writing:
 
-  spice-client-glib (spice-gtk) .... 0.43 + master @ 5f26179 (+ deps/patches/spice-gtk)
+  spice-client-glib (spice-gtk) .... 0.43 + master @ 112f480 (+ deps/patches/spice-gtk)
   glib / gobject / gio / gmodule ... 2.88.4
   openssl .......................... 3.5.9 (LTS)
   json-glib ........................ 1.10.8
-  opus ............................. 1.5.2
+  opus ............................. 1.6.1
   pixman ........................... 0.46.4
   libjpeg-turbo .................... 3.1.4.1
   libusb ........................... 1.0.30

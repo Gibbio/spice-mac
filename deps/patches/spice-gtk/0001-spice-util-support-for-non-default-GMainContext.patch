@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: osy <osy@turing.llc>
 Date: Fri, 4 Mar 2022 16:35:26 -0800
-Subject: [PATCH 1/9] spice-util: support for non-default GMainContext
+Subject: [PATCH 01/21] spice-util: support for non-default GMainContext
 
 When spice-gtk is used in an application with its own GMainContext, the
 wrong context will be used leading to various issues.
@@ -231,3 +231,6 @@ index 33f2ded..4d97937 100644
  
  SPICE_GTK_AVAILABLE_IN_0_43
  gulong spice_glib_signal_connect_object(gpointer instance,
+-- 
+2.56.0
+

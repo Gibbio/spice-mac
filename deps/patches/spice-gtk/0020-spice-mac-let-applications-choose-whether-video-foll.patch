@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Er Gibbio <gibbio@pm.me>
 Date: Thu, 22 Oct 2026 09:06:34 +0200
-Subject: [PATCH 20/20] spice-mac: let applications choose whether video
+Subject: [PATCH 20/21] spice-mac: let applications choose whether video
  follows the audio
 
 Once audio has played for a couple of seconds, video follows the audio
@@ -19,7 +19,7 @@ or off, at once; SPICE_STREAM_AUDIO_SYNC=0 turns it off from the start.
  3 files changed, 37 insertions(+), 3 deletions(-)
 
 diff --git a/src/channel-display.c b/src/channel-display.c
-index 5b0b75d..ea9f7b4 100644
+index 9b07b04..016a542 100644
 --- a/src/channel-display.c
 +++ b/src/channel-display.c
 @@ -89,6 +89,7 @@ struct _SpiceDisplayChannelPrivate {
@@ -30,7 +30,7 @@ index 5b0b75d..ea9f7b4 100644
      gint64                      playout_audio_since;
      gboolean                    playout_based;
      guint32                     playout_base;       /* own clock = monotonic ms + base */
-@@ -1143,6 +1144,8 @@ static void spice_display_channel_init(SpiceDisplayChannel *channel)
+@@ -1138,6 +1139,8 @@ static void spice_display_channel_init(SpiceDisplayChannel *channel)
       * no audio is playing (0 = always follow the server's timestamps) */
      const gchar *playout = g_getenv("SPICE_STREAM_PLAYOUT_MS");
      c->playout_target = playout != NULL ? atoi(playout) : PLAYOUT_DEFAULT_MS;
@@ -39,7 +39,7 @@ index 5b0b75d..ea9f7b4 100644
  }
  
  /* ------------------------------------------------------------------ */
-@@ -2011,8 +2014,9 @@ static void display_reschedule_streams(SpiceChannel *channel)
+@@ -2007,8 +2010,9 @@ static void display_reschedule_streams(SpiceChannel *channel)
   * server re-sends its own at the end of playback, and frames queued against it
   * would be dropped or held each time.
   *
@@ -51,7 +51,7 @@ index 5b0b75d..ea9f7b4 100644
   * and the server's timestamps, for lip sync, after one pause of about the audio
   * delay. Short sounds — notifications — never get there. When the audio stops,
   * the own clock continues from the session's and the shift is measured again:
-@@ -2031,7 +2035,7 @@ static void display_playout_mode(SpiceChannel *channel)
+@@ -2027,7 +2031,7 @@ static void display_playout_mode(SpiceChannel *channel)
      if (c->playout_target <= 0) {
          return;
      }
@@ -60,7 +60,7 @@ index 5b0b75d..ea9f7b4 100644
              spice_session_get_playback_latency(session) > 0;
      if (!audio) {
          c->playout_audio_since = 0;
-@@ -2129,6 +2133,33 @@ void spice_display_channel_set_stream_playout(SpiceChannel *channel, gint delay_
+@@ -2125,6 +2129,33 @@ void spice_display_channel_set_stream_playout(SpiceChannel *channel, gint delay_
      }
  }
  
@@ -95,7 +95,7 @@ index 5b0b75d..ea9f7b4 100644
   * spice_display_channel_get_stream_stats:
   * @channel: a #SpiceDisplayChannel
 diff --git a/src/channel-display.h b/src/channel-display.h
-index f27ba35..7e2bd39 100644
+index 743acf7..d082f8e 100644
 --- a/src/channel-display.h
 +++ b/src/channel-display.h
 @@ -220,6 +220,8 @@ guint spice_display_channel_get_stream_stats(SpiceChannel *channel, SpiceDisplay

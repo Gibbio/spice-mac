@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Er Gibbio <gibbio@pm.me>
 Date: Tue, 20 Oct 2026 19:52:45 +0200
-Subject: [PATCH 10/10] display: hold the preferred video codecs until the
+Subject: [PATCH 10/21] display: hold the preferred video codecs until the
  server's first MARK
 
 spice-server (0.15.2 up to master) handles SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_
@@ -30,7 +30,7 @@ change it from the main context, not from the channel's coroutine.
  1 file changed, 56 insertions(+), 11 deletions(-)
 
 diff --git a/src/channel-display.c b/src/channel-display.c
-index 0d7df71..13deae1 100644
+index 3262183..ad2993e 100644
 --- a/src/channel-display.c
 +++ b/src/channel-display.c
 @@ -90,6 +90,11 @@ struct _SpiceDisplayChannelPrivate {
@@ -45,7 +45,7 @@ index 0d7df71..13deae1 100644
      SpiceGlScanout              scanout_ret;
      SpiceGlScanout2             scanout;
  };
-@@ -277,6 +282,8 @@ static void spice_display_channel_reset(SpiceChannel *channel, gboolean migratin
+@@ -275,6 +280,8 @@ static void spice_display_channel_reset(SpiceChannel *channel, gboolean migratin
      /* palettes, images, and glz_window are cleared in the session */
      clear_streams(channel);
      clear_surfaces(channel, TRUE);
@@ -54,7 +54,7 @@ index 0d7df71..13deae1 100644
  
      SPICE_CHANNEL_CLASS(spice_display_channel_parent_class)->channel_reset(channel, migrating);
  }
-@@ -637,29 +644,63 @@ void spice_display_channel_change_preferred_compression(SpiceChannel *channel, g
+@@ -635,26 +642,60 @@ void spice_display_channel_change_preferred_compression(SpiceChannel *channel, g
      spice_msg_out_send_internal(out);
  }
  
@@ -65,7 +65,7 @@ index 0d7df71..13deae1 100644
  {
 +    SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
      SpiceMsgOut *out;
-     SpiceMsgcDisplayPreferredVideoCodecType *msg;
+     g_autofree SpiceMsgcDisplayPreferredVideoCodecType *msg = NULL;
 -    int i;
 +    gsize i;
  
@@ -92,9 +92,8 @@ index 0d7df71..13deae1 100644
 +    /* not spice_msg_out_send_internal(): applications call this from the main
 +     * context, not the channel's coroutine */
 +    spice_msg_out_send(out);
-     g_free(msg);
- }
- 
++}
++
 +/* main or coroutine context
 + *
 + * The preference is kept, and sent once the server has sent its first MARK (and
@@ -121,12 +120,10 @@ index 0d7df71..13deae1 100644
 +    } else {
 +        CHANNEL_DEBUG(channel, "preferred video codecs kept until the server's first MARK");
 +    }
-+}
-+
+ }
+ 
  /**
-  * spice_display_change_preferred_video_codec_type: (method)
-  * @channel: (type SpiceDisplayChannel): a #SpiceDisplayChannel
-@@ -1022,9 +1063,7 @@ static void spice_display_channel_set_capabilities(SpiceChannel *channel)
+@@ -1018,9 +1059,7 @@ static void spice_display_channel_set_capabilities(SpiceChannel *channel)
  #ifdef HAVE_VIDEOTOOLBOX
  /* SPICE_PREFERRED_VIDEO_CODECS="h264,mjpeg" asks the server to prefer these codecs.
   * Servers pick from their own list in order (spice:mjpeg first by default), so
@@ -137,7 +134,7 @@ index 0d7df71..13deae1 100644
  static void display_send_preferred_codecs_from_env(SpiceChannel *channel)
  {
      gint codecs[SPICE_VIDEO_CODEC_TYPE_ENUM_END];
-@@ -1298,6 +1337,12 @@ static void display_handle_mark(SpiceChannel *channel, SpiceMsgIn *in)
+@@ -1294,6 +1333,12 @@ static void display_handle_mark(SpiceChannel *channel, SpiceMsgIn *in)
  
      c->mark = TRUE;
      g_coroutine_signal_emit(channel, signals[SPICE_DISPLAY_MARK], 0, TRUE);
@@ -150,3 +147,6 @@ index 0d7df71..13deae1 100644
  }
  
  /* coroutine context */
+-- 
+2.56.0
+

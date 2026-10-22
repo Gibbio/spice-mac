@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Er Gibbio <gibbio@pm.me>
 Date: Tue, 20 Oct 2026 14:25:56 +0200
-Subject: [PATCH 9/9] mjpeg: decode a frame ahead of its display time
+Subject: [PATCH 09/21] mjpeg: decode a frame ahead of its display time
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -27,7 +27,7 @@ max 5 ms after.
  1 file changed, 40 insertions(+), 9 deletions(-)
 
 diff --git a/src/channel-display-mjpeg.c b/src/channel-display-mjpeg.c
-index e63eb18..d79fc13 100644
+index a2c909e..74b5dad 100644
 --- a/src/channel-display-mjpeg.c
 +++ b/src/channel-display-mjpeg.c
 @@ -38,12 +38,14 @@ typedef struct MJpegDecoder {
@@ -132,11 +132,14 @@ index e63eb18..d79fc13 100644
                  break;
              }
  
-@@ -211,6 +241,7 @@ static void mjpeg_decoder_drop_queue(MJpegDecoder *decoder)
-         decoder->timer_id = 0;
-     }
+@@ -208,6 +238,7 @@ static void mjpeg_decoder_drop_queue(MJpegDecoder *decoder)
+ {
+     g_clear_handle_id(&decoder->timer_id, g_spice_source_remove);
      g_clear_pointer(&decoder->cur_frame, spice_frame_free);
 +    decoder->cur_decoded = FALSE;
      g_queue_foreach(decoder->msgq, spice_frame_unref_func, NULL);
      g_queue_clear(decoder->msgq);
  }
+-- 
+2.56.0
+

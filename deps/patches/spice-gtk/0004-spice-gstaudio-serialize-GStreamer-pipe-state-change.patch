@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Evan Champion <306651197+evan314159@users.noreply.github.com>
 Date: Sat, 5 Sep 2026 10:48:43 +0800
-Subject: [PATCH 4/9] spice-gstaudio: serialize GStreamer pipe state changes
+Subject: [PATCH 04/21] spice-gstaudio: serialize GStreamer pipe state changes
  off the main context
 
 AudioOutputUnitStop() called from GStreamer in the main context thread
@@ -24,7 +24,7 @@ Assisted-by: Claude:claude-opus-4-8
  1 file changed, 69 insertions(+), 7 deletions(-)
 
 diff --git a/src/spice-gstaudio.c b/src/spice-gstaudio.c
-index e424a5d..4f2c46e 100644
+index 1f94cf5..69fdab3 100644
 --- a/src/spice-gstaudio.c
 +++ b/src/spice-gstaudio.c
 @@ -33,6 +33,8 @@ struct stream {
@@ -112,7 +112,7 @@ index e424a5d..4f2c46e 100644
      g_clear_pointer(&s->src, gst_object_unref);
      g_clear_pointer(&s->sink, gst_object_unref);
  }
-@@ -135,7 +197,7 @@ static void record_stop(SpiceGstaudio *gstaudio)
+@@ -132,7 +194,7 @@ static void record_stop(SpiceGstaudio *gstaudio)
  
      SPICE_DEBUG("%s", __FUNCTION__);
      if (p->record.pipe)
@@ -121,16 +121,16 @@ index e424a5d..4f2c46e 100644
  }
  
  static gboolean record_bus_cb(GstBus *bus, GstMessage *msg, gpointer data)
-@@ -195,7 +257,7 @@ static void record_start(SpiceRecordChannel *channel, gint format, gint channels
+@@ -192,7 +254,7 @@ static void record_start(SpiceRecordChannel *channel, gint format, gint channels
      if (p->record.pipe &&
          (p->record.rate != frequency ||
           p->record.channels != channels)) {
 -        gst_element_set_state(p->record.pipe, GST_STATE_NULL);
 +        stream_set_state_async(&p->record, GST_STATE_NULL);
-         if (p->rbus_watch_id > 0) {
-             g_spice_source_remove(p->rbus_watch_id);
-             p->rbus_watch_id = 0;
-@@ -241,7 +303,7 @@ cleanup:
+         g_clear_handle_id(&p->rbus_watch_id, g_spice_source_remove);
+         g_clear_pointer(&p->record.pipe, gst_object_unref);
+     }
+@@ -235,7 +297,7 @@ cleanup:
      }
  
      if (p->record.pipe)
@@ -139,16 +139,16 @@ index e424a5d..4f2c46e 100644
  }
  
  static void playback_stop(SpiceGstaudio *gstaudio)
-@@ -249,7 +311,7 @@ static void playback_stop(SpiceGstaudio *gstaudio)
+@@ -243,7 +305,7 @@ static void playback_stop(SpiceGstaudio *gstaudio)
      SpiceGstaudioPrivate *p = gstaudio->priv;
  
      if (p->playback.pipe)
 -        gst_element_set_state(p->playback.pipe, GST_STATE_READY);
 +        stream_set_state_async(&p->playback, GST_STATE_READY);
-     if (p->mmtime_id != 0) {
-         g_spice_source_remove(p->mmtime_id);
-         p->mmtime_id = 0;
-@@ -324,7 +386,7 @@ cleanup:
+     g_clear_handle_id(&p->mmtime_id, g_spice_source_remove);
+ }
+ 
+@@ -315,7 +377,7 @@ cleanup:
      }
  
      if (p->playback.pipe)
@@ -157,3 +157,6 @@ index e424a5d..4f2c46e 100644
  
      if (!p->playback.fake && p->mmtime_id == 0) {
          update_mmtime_timeout_cb(gstaudio);
+-- 
+2.56.0
+

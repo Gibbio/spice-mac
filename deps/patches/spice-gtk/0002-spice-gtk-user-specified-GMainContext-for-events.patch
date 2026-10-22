@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: osy <osy@turing.llc>
 Date: Fri, 4 Mar 2022 16:44:20 -0800
-Subject: [PATCH 2/9] spice-gtk: user specified GMainContext for events
+Subject: [PATCH 02/21] spice-gtk: user specified GMainContext for events
 
 Following the previous commit, this replaces all GLib calls that
 implicitly uses the default main context with versions that can use the
@@ -28,10 +28,10 @@ main context set by spice_util_set_main_context().
  16 files changed, 67 insertions(+), 61 deletions(-)
 
 diff --git a/src/channel-display-gst.c b/src/channel-display-gst.c
-index e7811cd..823a916 100644
+index e063853..f720ca6 100644
 --- a/src/channel-display-gst.c
 +++ b/src/channel-display-gst.c
-@@ -302,13 +302,13 @@ static void schedule_frame(SpiceGstDecoder *decoder)
+@@ -301,13 +301,13 @@ static void schedule_frame(SpiceGstDecoder *decoder)
          }
  
          if (spice_mmtime_diff(gstframe->encoded_frame->mm_time, now) >= 0) {
@@ -48,7 +48,7 @@ index e7811cd..823a916 100644
          } else {
              SPICE_DEBUG("%s: rendering too late by %u ms (ts: %u, mmtime: %u), dropping",
                          __FUNCTION__, now - gstframe->encoded_frame->mm_time,
-@@ -821,7 +821,7 @@ static void spice_gst_decoder_reschedule(VideoDecoder *video_decoder)
+@@ -771,7 +771,7 @@ static void spice_gst_decoder_reschedule(VideoDecoder *video_decoder)
      g_mutex_unlock(&decoder->queues_mutex);
  
      if (timer_id != 0) {
@@ -57,7 +57,7 @@ index e7811cd..823a916 100644
      }
      schedule_frame(decoder);
  }
-@@ -841,7 +841,7 @@ static void spice_gst_decoder_destroy(VideoDecoder *video_decoder)
+@@ -791,7 +791,7 @@ static void spice_gst_decoder_destroy(VideoDecoder *video_decoder)
       * scheduled display_frame() call and drop the queued frames.
       */
      if (decoder->timer_id) {
@@ -67,7 +67,7 @@ index e7811cd..823a916 100644
      g_mutex_clear(&decoder->queues_mutex);
      g_queue_free_full(decoder->decoding_queue, (GDestroyNotify)free_gst_frame);
 diff --git a/src/channel-display-mjpeg.c b/src/channel-display-mjpeg.c
-index 558d9f8..e63eb18 100644
+index 79b6ee9..a2c909e 100644
 --- a/src/channel-display-mjpeg.c
 +++ b/src/channel-display-mjpeg.c
 @@ -183,7 +183,7 @@ static void mjpeg_decoder_schedule(MJpegDecoder *decoder)
@@ -79,47 +79,47 @@ index 558d9f8..e63eb18 100644
                  break;
              }
  
-@@ -207,7 +207,7 @@ static void spice_frame_unref_func(gpointer data, gpointer user_data)
+@@ -206,7 +206,7 @@ static void spice_frame_unref_func(gpointer data, gpointer user_data)
+ 
  static void mjpeg_decoder_drop_queue(MJpegDecoder *decoder)
  {
-     if (decoder->timer_id != 0) {
--        g_source_remove(decoder->timer_id);
-+        g_spice_source_remove(decoder->timer_id);
-         decoder->timer_id = 0;
-     }
+-    g_clear_handle_id(&decoder->timer_id, g_source_remove);
++    g_clear_handle_id(&decoder->timer_id, g_spice_source_remove);
      g_clear_pointer(&decoder->cur_frame, spice_frame_free);
-@@ -255,7 +255,7 @@ static void mjpeg_decoder_reschedule(VideoDecoder *video_decoder)
+     g_queue_foreach(decoder->msgq, spice_frame_unref_func, NULL);
+     g_queue_clear(decoder->msgq);
+@@ -251,7 +251,7 @@ static void mjpeg_decoder_reschedule(VideoDecoder *video_decoder)
+     MJpegDecoder *decoder = (MJpegDecoder*)video_decoder;
  
      SPICE_DEBUG("%s", __FUNCTION__);
-     if (decoder->timer_id != 0) {
--        g_source_remove(decoder->timer_id);
-+        g_spice_source_remove(decoder->timer_id);
-         decoder->timer_id = 0;
-     }
+-    g_clear_handle_id(&decoder->timer_id, g_source_remove);
++    g_clear_handle_id(&decoder->timer_id, g_spice_source_remove);
      mjpeg_decoder_schedule(decoder);
+ }
+ 
 diff --git a/src/channel-display.c b/src/channel-display.c
-index 61861d2..947ca15 100644
+index 0f658c3..c895ff5 100644
 --- a/src/channel-display.c
 +++ b/src/channel-display.c
-@@ -152,7 +152,7 @@ static void spice_display_channel_dispose(GObject *object)
+@@ -151,7 +151,7 @@ static void spice_display_channel_dispose(GObject *object)
+ {
      SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(object)->priv;
  
-     if (c->mark_false_event_id != 0) {
--        g_source_remove(c->mark_false_event_id);
-+        g_spice_source_remove(c->mark_false_event_id);
-         c->mark_false_event_id = 0;
-     }
+-    g_clear_handle_id(&c->mark_false_event_id, g_source_remove);
++    g_clear_handle_id(&c->mark_false_event_id, g_spice_source_remove);
  
-@@ -2013,7 +2013,7 @@ static void display_handle_surface_create(SpiceChannel *channel, SpiceMsgIn *in)
+     for (int i = 0; i < c->scanout.num_planes; i++) {
+         if (c->scanout.fd[i] >= 0) {
+@@ -2006,7 +2006,7 @@ static void display_handle_surface_create(SpiceChannel *channel, SpiceMsgIn *in)
+         SPICE_DEBUG("surface flags: %x", create->flags);
          surface->primary = true;
          create_canvas(channel, surface);
-         if (c->mark_false_event_id != 0) {
--            g_source_remove(c->mark_false_event_id);
-+            g_spice_source_remove(c->mark_false_event_id);
-             c->mark_false_event_id = 0;
-         }
+-        g_clear_handle_id(&c->mark_false_event_id, g_source_remove);
++        g_clear_handle_id(&c->mark_false_event_id, g_spice_source_remove);
      } else {
-@@ -2054,7 +2054,7 @@ static void display_handle_surface_destroy(SpiceChannel *channel, SpiceMsgIn *in
+         surface->primary = false;
+         create_canvas(channel, surface);
+@@ -2045,7 +2045,7 @@ static void display_handle_surface_destroy(SpiceChannel *channel, SpiceMsgIn *in
          CHANNEL_DEBUG(channel, "%d: FIXME primary destroy, but is display really disabled?", id);
          /* this is done with a timeout in spicec as well, it's *ugly* */
          if (id != 0 && c->mark_false_event_id == 0) {
@@ -129,40 +129,34 @@ index 61861d2..947ca15 100644
          c->primary = NULL;
          g_coroutine_signal_emit(channel, signals[SPICE_DISPLAY_PRIMARY_DESTROY], 0);
 diff --git a/src/channel-main.c b/src/channel-main.c
-index e31b2f8..1a033e7 100644
+index 5402a45..991e10f 100644
 --- a/src/channel-main.c
 +++ b/src/channel-main.c
-@@ -361,17 +361,17 @@ static void spice_main_channel_dispose(GObject *obj)
+@@ -359,11 +359,11 @@ static void spice_main_channel_dispose(GObject *obj)
+ {
      SpiceMainChannelPrivate *c = SPICE_MAIN_CHANNEL(obj)->priv;
  
-     if (c->timer_id) {
--        g_source_remove(c->timer_id);
-+        g_spice_source_remove(c->timer_id);
-         c->timer_id = 0;
-     }
+-    g_clear_handle_id(&c->timer_id, g_source_remove);
++    g_clear_handle_id(&c->timer_id, g_spice_source_remove);
  
-     if (c->switch_host_delayed_id) {
--        g_source_remove(c->switch_host_delayed_id);
-+        g_spice_source_remove(c->switch_host_delayed_id);
-         c->switch_host_delayed_id = 0;
-     }
+-    g_clear_handle_id(&c->switch_host_delayed_id, g_source_remove);
++    g_clear_handle_id(&c->switch_host_delayed_id, g_spice_source_remove);
  
-     if (c->migrate_delayed_id) {
--        g_source_remove(c->migrate_delayed_id);
-+        g_spice_source_remove(c->migrate_delayed_id);
-         c->migrate_delayed_id = 0;
-     }
+-    g_clear_handle_id(&c->migrate_delayed_id, g_source_remove);
++    g_clear_handle_id(&c->migrate_delayed_id, g_spice_source_remove);
  
-@@ -1188,7 +1188,7 @@ gboolean spice_main_channel_send_monitor_config(SpiceMainChannel *channel)
+     g_clear_pointer(&c->file_xfer_tasks, g_hash_table_unref);
+     g_clear_pointer (&c->flushing, g_hash_table_unref);
+@@ -1172,7 +1172,7 @@ gboolean spice_main_channel_send_monitor_config(SpiceMainChannel *channel)
+     agent_msg_queue(channel, VD_AGENT_MONITORS_CONFIG, size, mon);
  
      spice_channel_wakeup(SPICE_CHANNEL(channel), FALSE);
-     if (c->timer_id != 0) {
--        g_source_remove(c->timer_id);
-+        g_spice_source_remove(c->timer_id);
-         c->timer_id = 0;
-     }
+-    g_clear_handle_id(&c->timer_id, g_source_remove);
++    g_clear_handle_id(&c->timer_id, g_spice_source_remove);
  
-@@ -1568,16 +1568,16 @@ static void update_display_timer(SpiceMainChannel *channel, guint seconds)
+     return TRUE;
+ }
+@@ -1543,16 +1543,16 @@ static void update_display_timer(SpiceMainChannel *channel, guint seconds)
      SpiceMainChannelPrivate *c = channel->priv;
  
      if (c->timer_id)
@@ -182,7 +176,7 @@ index e31b2f8..1a033e7 100644
      }
  
  }
-@@ -1797,7 +1797,7 @@ static void main_handle_channels_list(SpiceChannel *channel, SpiceMsgIn *in)
+@@ -1770,7 +1770,7 @@ static void main_handle_channels_list(SpiceChannel *channel, SpiceMsgIn *in)
          c->id = msg->channels[i].id;
          /* no need to explicitly switch to main context, since
             synchronous call is not needed. */
@@ -191,7 +185,7 @@ index e31b2f8..1a033e7 100644
      }
  }
  
-@@ -2578,7 +2578,7 @@ static void main_handle_migrate_end(SpiceChannel *channel, SpiceMsgIn *in)
+@@ -2549,7 +2549,7 @@ static void main_handle_migrate_end(SpiceChannel *channel, SpiceMsgIn *in)
      g_return_if_fail(c->migrate_delayed_id == 0);
      g_return_if_fail(spice_channel_test_capability(channel, SPICE_MAIN_CAP_SEMI_SEAMLESS_MIGRATE));
  
@@ -200,7 +194,7 @@ index e31b2f8..1a033e7 100644
  }
  
  /* main context */
-@@ -2622,7 +2622,7 @@ static void main_handle_migrate_switch_host(SpiceChannel *channel, SpiceMsgIn *i
+@@ -2593,7 +2593,7 @@ static void main_handle_migrate_switch_host(SpiceChannel *channel, SpiceMsgIn *i
  
      if (c->switch_host_delayed_id != 0) {
          g_warning("Switching host already in progress, aborting it");
@@ -209,7 +203,7 @@ index e31b2f8..1a033e7 100644
          c->switch_host_delayed_id = 0;
      }
  
-@@ -2635,7 +2635,7 @@ static void main_handle_migrate_switch_host(SpiceChannel *channel, SpiceMsgIn *i
+@@ -2606,7 +2606,7 @@ static void main_handle_migrate_switch_host(SpiceChannel *channel, SpiceMsgIn *i
      spice_session_set_port(session, mig->port, FALSE);
      spice_session_set_port(session, mig->sport, TRUE);
  
@@ -219,7 +213,7 @@ index e31b2f8..1a033e7 100644
  
  /* coroutine context */
 diff --git a/src/channel-usbredir.c b/src/channel-usbredir.c
-index de8d2ff..6806ed3 100644
+index fe28762..9916ced 100644
 --- a/src/channel-usbredir.c
 +++ b/src/channel-usbredir.c
 @@ -709,7 +709,7 @@ static void usbredir_handle_msg(SpiceChannel *c, SpiceMsgIn *in)
@@ -232,7 +226,7 @@ index de8d2ff..6806ed3 100644
  
          spice_usb_backend_device_unref(err_data.device);
 diff --git a/src/channel-webdav.c b/src/channel-webdav.c
-index f0a524d..f597b61 100644
+index f6146e6..450b361 100644
 --- a/src/channel-webdav.c
 +++ b/src/channel-webdav.c
 @@ -97,7 +97,7 @@ static void output_queue_free(OutputQueue *queue)
@@ -244,16 +238,16 @@ index f0a524d..f597b61 100644
      g_free(queue);
  }
  
-@@ -120,7 +120,7 @@ static void output_queue_flush_cb(GObject *source_object,
-     g_clear_error(&error);
+@@ -118,7 +118,7 @@ static void output_queue_flush_cb(GObject *source_object,
+         g_warning("error: %s", error->message);
  
      if (!q->idle_id)
 -        q->idle_id = g_idle_add(output_queue_idle, q);
 +        q->idle_id = g_spice_idle_add(output_queue_idle, q);
- 
-     g_free(e);
  }
-@@ -175,7 +175,7 @@ static void output_queue_push(OutputQueue *q, const guint8 *buf, gsize size,
+ 
+ static gboolean output_queue_idle(gpointer user_data)
+@@ -170,7 +170,7 @@ static void output_queue_push(OutputQueue *q, const guint8 *buf, gsize size,
      g_queue_push_tail(q->queue, e);
  
      if (!q->idle_id && !q->flushing)
@@ -263,7 +257,7 @@ index f0a524d..f597b61 100644
  #endif
  
 diff --git a/src/gio-coroutine.c b/src/gio-coroutine.c
-index b14100b..fe90bac 100644
+index 17251e9..af554f3 100644
 --- a/src/gio-coroutine.c
 +++ b/src/gio-coroutine.c
 @@ -20,6 +20,8 @@
@@ -275,14 +269,13 @@ index b14100b..fe90bac 100644
  
  typedef struct _GConditionWaitSource
  {
-@@ -56,14 +58,14 @@ GIOCondition g_coroutine_socket_wait(GCoroutine *self,
+@@ -55,13 +57,13 @@ GIOCondition g_coroutine_socket_wait(GCoroutine *self,
  
-     src = g_socket_create_source(sock, cond | G_IO_HUP | G_IO_ERR | G_IO_NVAL, NULL);
+     g_autoptr(GSource) src = g_socket_create_source(sock, cond | G_IO_HUP | G_IO_ERR | G_IO_NVAL, NULL);
      g_source_set_callback(src, (GSourceFunc)g_io_wait_helper, self, NULL);
 -    self->wait_id = g_source_attach(src, NULL);
 +    self->wait_id = g_source_attach(src, spice_main_context());
      ret = coroutine_yield(NULL);
-     g_source_unref(src);
  
      if (ret != NULL)
          val = *ret;
@@ -292,16 +285,16 @@ index b14100b..fe90bac 100644
  
      self->wait_id = 0;
      return val;
-@@ -76,7 +78,7 @@ void g_coroutine_condition_cancel(GCoroutine *coroutine)
+@@ -74,7 +76,7 @@ void g_coroutine_condition_cancel(GCoroutine *coroutine)
      if (coroutine->condition_id == 0)
          return;
  
--    g_source_remove(coroutine->condition_id);
-+    g_spice_source_remove(coroutine->condition_id);
-     coroutine->condition_id = 0;
+-    g_clear_handle_id(&coroutine->condition_id, g_source_remove);
++    g_clear_handle_id(&coroutine->condition_id, g_spice_source_remove);
  }
  
-@@ -166,7 +168,7 @@ gboolean g_coroutine_condition_wait(GCoroutine *self, GConditionWaitFunc func, g
+ void g_coroutine_wakeup(GCoroutine *coroutine)
+@@ -162,7 +164,7 @@ gboolean g_coroutine_condition_wait(GCoroutine *self, GConditionWaitFunc func, g
      vsrc->func = func;
      vsrc->data = data;
  
@@ -309,8 +302,8 @@ index b14100b..fe90bac 100644
 +    self->condition_id = g_source_attach(src, spice_main_context());
      g_source_set_callback(src, g_condition_wait_helper, self, NULL);
      coroutine_yield(NULL);
-     g_source_unref(src);
-@@ -220,7 +222,7 @@ g_coroutine_signal_emit(gpointer instance, guint signal_id,
+ 
+@@ -215,7 +217,7 @@ g_coroutine_signal_emit(gpointer instance, guint signal_id,
          g_signal_emit_valist(instance, signal_id, detail, data.var_args);
      } else {
          g_object_ref(instance);
@@ -319,7 +312,7 @@ index b14100b..fe90bac 100644
          coroutine_yield(NULL);
          g_warn_if_fail(data.notified);
          g_object_unref(instance);
-@@ -257,7 +259,7 @@ void g_coroutine_object_notify(GObject *object,
+@@ -252,7 +254,7 @@ void g_coroutine_object_notify(GObject *object,
          data.propname = (gpointer)property_name;
          data.notified = FALSE;
  
@@ -329,7 +322,7 @@ index b14100b..fe90bac 100644
          /* This switches to the system coroutine context, lets
           * the idle function run to dispatch the signal, and
 diff --git a/src/smartcard-manager.c b/src/smartcard-manager.c
-index 0385c26..0e1700b 100644
+index 7b6fe99..53005d0 100644
 --- a/src/smartcard-manager.c
 +++ b/src/smartcard-manager.c
 @@ -27,6 +27,7 @@
@@ -340,16 +333,16 @@ index 0385c26..0e1700b 100644
  
  /**
   * SECTION:smartcard-manager
-@@ -111,7 +112,7 @@ static void spice_smartcard_manager_finalize(GObject *gobject)
+@@ -110,7 +111,7 @@ static void spice_smartcard_manager_finalize(GObject *gobject)
+     SpiceSmartcardManager *manager = SPICE_SMARTCARD_MANAGER(gobject);
      SpiceSmartcardManagerPrivate *priv = manager->priv;
  
-     if (priv->monitor_id != 0) {
--        g_source_remove(priv->monitor_id);
-+        g_spice_source_remove(priv->monitor_id);
-         priv->monitor_id = 0;
-     }
+-    g_clear_handle_id(&priv->monitor_id, g_source_remove);
++    g_clear_handle_id(&priv->monitor_id, g_spice_source_remove);
  
-@@ -364,7 +365,7 @@ static guint smartcard_monitor_add(SmartcardSourceFunc callback,
+ #ifdef USE_SMARTCARD
+     g_clear_pointer(&priv->software_reader, vreader_free);
+@@ -360,7 +361,7 @@ static guint smartcard_monitor_add(SmartcardSourceFunc callback,
  
      source = smartcard_monitor_source_new();
      g_source_set_callback(source, (GSourceFunc)callback, user_data, NULL);
@@ -359,10 +352,10 @@ index 0385c26..0e1700b 100644
  
      return id;
 diff --git a/src/spice-channel.c b/src/spice-channel.c
-index 722fe9f..66b3a06 100644
+index 3ce5d6e..6c5c4e8 100644
 --- a/src/spice-channel.c
 +++ b/src/spice-channel.c
-@@ -745,9 +745,9 @@ void spice_msg_out_send(SpiceMsgOut *out)
+@@ -743,9 +743,9 @@ void spice_msg_out_send(SpiceMsgOut *out)
      if (was_empty && !c->xmit_queue_wakeup_id) {
          c->xmit_queue_wakeup_id =
              /* Use g_timeout_add_full so that can specify the priority */
@@ -375,7 +368,7 @@ index 722fe9f..66b3a06 100644
      }
  
  end:
-@@ -2766,7 +2766,7 @@ cleanup:
+@@ -2763,7 +2763,7 @@ cleanup:
          c->event = SPICE_CHANNEL_ERROR_CONNECT;
      }
  
@@ -384,7 +377,7 @@ index 722fe9f..66b3a06 100644
      /* Co-routine exits now - the SpiceChannel object may no longer exist,
         so don't do anything else now unless you like SEGVs */
      return NULL;
-@@ -2825,7 +2825,7 @@ static gboolean channel_connect(SpiceChannel *channel, gboolean tls)
+@@ -2822,7 +2822,7 @@ static gboolean channel_connect(SpiceChannel *channel, gboolean tls)
      g_object_ref(G_OBJECT(channel)); /* Unref'd when co-routine exits */
  
      /* we connect in idle, to let previous coroutine exit, if present */
@@ -393,26 +386,26 @@ index 722fe9f..66b3a06 100644
  
      return true;
  }
-@@ -2891,7 +2891,7 @@ static void channel_reset(SpiceChannel *channel, gboolean migrating)
+@@ -2887,7 +2887,7 @@ static void channel_reset(SpiceChannel *channel, gboolean migrating)
+     SpiceChannelPrivate *c = channel->priv;
  
      CHANNEL_DEBUG(channel, "channel reset");
-     if (c->connect_delayed_id) {
--        g_source_remove(c->connect_delayed_id);
-+        g_spice_source_remove(c->connect_delayed_id);
-         c->connect_delayed_id = 0;
-     }
+-    g_clear_handle_id(&c->connect_delayed_id, g_source_remove);
++    g_clear_handle_id(&c->connect_delayed_id, g_spice_source_remove);
  
-@@ -2923,7 +2923,7 @@ static void channel_reset(SpiceChannel *channel, gboolean migrating)
+ #ifdef HAVE_SASL
+     if (c->sasl_conn) {
+@@ -2916,7 +2916,7 @@ static void channel_reset(SpiceChannel *channel, gboolean migrating)
+     gboolean was_empty = g_queue_is_empty(&c->xmit_queue);
      g_queue_foreach(&c->xmit_queue, (GFunc)spice_msg_out_unref, NULL);
      g_queue_clear(&c->xmit_queue);
-     if (c->xmit_queue_wakeup_id) {
--        g_source_remove(c->xmit_queue_wakeup_id);
-+        g_spice_source_remove(c->xmit_queue_wakeup_id);
-         c->xmit_queue_wakeup_id = 0;
-     }
+-    g_clear_handle_id(&c->xmit_queue_wakeup_id, g_source_remove);
++    g_clear_handle_id(&c->xmit_queue_wakeup_id, g_spice_source_remove);
      g_mutex_unlock(&c->xmit_queue_lock);
+     spice_channel_flushed(channel, was_empty);
+ 
 diff --git a/src/spice-gstaudio.c b/src/spice-gstaudio.c
-index 18770e4..e424a5d 100644
+index a2363b9..1f94cf5 100644
 --- a/src/spice-gstaudio.c
 +++ b/src/spice-gstaudio.c
 @@ -24,7 +24,7 @@
@@ -424,34 +417,34 @@ index 18770e4..e424a5d 100644
  
  struct stream {
      GstElement              *pipe;
-@@ -79,7 +79,7 @@ static void spice_gstaudio_dispose(GObject *obj)
+@@ -78,7 +78,7 @@ static void spice_gstaudio_dispose(GObject *obj)
+     p = gstaudio->priv;
  
      stream_dispose(&p->playback);
-     if (p->rbus_watch_id > 0) {
--        g_source_remove(p->rbus_watch_id);
-+        g_spice_source_remove(p->rbus_watch_id);
-         p->rbus_watch_id = 0;
-     }
+-    g_clear_handle_id(&p->rbus_watch_id, g_source_remove);
++    g_clear_handle_id(&p->rbus_watch_id, g_spice_source_remove);
      stream_dispose(&p->record);
-@@ -197,7 +197,7 @@ static void record_start(SpiceRecordChannel *channel, gint format, gint channels
+ 
+     if (p->pchannel)
+@@ -193,7 +193,7 @@ static void record_start(SpiceRecordChannel *channel, gint format, gint channels
+         (p->record.rate != frequency ||
           p->record.channels != channels)) {
          gst_element_set_state(p->record.pipe, GST_STATE_NULL);
-         if (p->rbus_watch_id > 0) {
--            g_source_remove(p->rbus_watch_id);
-+            g_spice_source_remove(p->rbus_watch_id);
-             p->rbus_watch_id = 0;
-         }
+-        g_clear_handle_id(&p->rbus_watch_id, g_source_remove);
++        g_clear_handle_id(&p->rbus_watch_id, g_spice_source_remove);
          g_clear_pointer(&p->record.pipe, gst_object_unref);
-@@ -251,7 +251,7 @@ static void playback_stop(SpiceGstaudio *gstaudio)
+     }
+ 
+@@ -244,7 +244,7 @@ static void playback_stop(SpiceGstaudio *gstaudio)
+ 
      if (p->playback.pipe)
          gst_element_set_state(p->playback.pipe, GST_STATE_READY);
-     if (p->mmtime_id != 0) {
--        g_source_remove(p->mmtime_id);
-+        g_spice_source_remove(p->mmtime_id);
-         p->mmtime_id = 0;
-     }
+-    g_clear_handle_id(&p->mmtime_id, g_source_remove);
++    g_clear_handle_id(&p->mmtime_id, g_spice_source_remove);
  }
-@@ -328,7 +328,7 @@ cleanup:
+ 
+ static gboolean update_mmtime_timeout_cb(gpointer data)
+@@ -319,7 +319,7 @@ cleanup:
  
      if (!p->playback.fake && p->mmtime_id == 0) {
          update_mmtime_timeout_cb(gstaudio);
@@ -461,7 +454,7 @@ index 18770e4..e424a5d 100644
  }
  
 diff --git a/src/spice-gtk-session.c b/src/spice-gtk-session.c
-index a3829f7..5735586 100644
+index 4e9ffec..faea2fa 100644
 --- a/src/spice-gtk-session.c
 +++ b/src/spice-gtk-session.c
 @@ -287,7 +287,7 @@ static void clipboard_release_delay_remove(SpiceGtkSession *self, guint selectio
@@ -473,7 +466,7 @@ index a3829f7..5735586 100644
      s->clipboard_release_delay[selection] = 0;
  }
  
-@@ -867,7 +867,7 @@ static void clipboard_get(GtkClipboard *clipboard,
+@@ -861,7 +861,7 @@ static void clipboard_get(GtkClipboard *clipboard,
  
      ri.selection_data = selection_data;
      ri.info = info;
@@ -482,7 +475,7 @@ index a3829f7..5735586 100644
      ri.selection = selection;
      ri.self = self;
  
-@@ -1550,8 +1550,8 @@ static void clipboard_release_delay(SpiceMainChannel *main, guint selection,
+@@ -1527,8 +1527,8 @@ static void clipboard_release_delay(SpiceMainChannel *main, guint selection,
      rel->self = self;
      rel->selection = selection;
      s->clipboard_release_delay[selection] =
@@ -494,19 +487,19 @@ index a3829f7..5735586 100644
  }
  
 diff --git a/src/spice-session.c b/src/spice-session.c
-index a9a50ad..0477ec8 100644
+index 9f58301..211918f 100644
 --- a/src/spice-session.c
 +++ b/src/spice-session.c
-@@ -1859,7 +1859,7 @@ end:
+@@ -1847,7 +1847,7 @@ end:
+     g_clear_object(&s->migration);
  
      s->migrate_wait_init = FALSE;
-     if (s->after_main_init) {
--        g_source_remove(s->after_main_init);
-+        g_spice_source_remove(s->after_main_init);
-         s->after_main_init = 0;
-     }
+-    g_clear_handle_id(&s->after_main_init, g_source_remove);
++    g_clear_handle_id(&s->after_main_init, g_spice_source_remove);
  
-@@ -1934,7 +1934,7 @@ gboolean spice_session_migrate_after_main_init(SpiceSession *self)
+     spice_session_set_migration_state(session, SPICE_SESSION_MIGRATION_NONE);
+ }
+@@ -1920,7 +1920,7 @@ gboolean spice_session_migrate_after_main_init(SpiceSession *self)
      g_return_val_if_fail(s->after_main_init == 0, FALSE);
  
      s->migrate_wait_init = FALSE;
@@ -515,7 +508,7 @@ index a9a50ad..0477ec8 100644
  
      return TRUE;
  }
-@@ -2027,7 +2027,7 @@ void spice_session_disconnect(SpiceSession *session)
+@@ -2013,7 +2013,7 @@ void spice_session_disconnect(SpiceSession *session)
          return;
  
      g_object_ref(session);
@@ -524,7 +517,7 @@ index a9a50ad..0477ec8 100644
  }
  
  /**
-@@ -2269,7 +2269,7 @@ GSocketConnection* spice_session_channel_open_host(SpiceSession *session, SpiceC
+@@ -2252,7 +2252,7 @@ GSocketConnection* spice_session_channel_open_host(SpiceSession *session, SpiceC
      g_socket_client_set_enable_proxy(open_host.client, s->proxy != NULL);
      g_socket_client_set_timeout(open_host.client, SOCKET_TIMEOUT);
  
@@ -534,7 +527,7 @@ index a9a50ad..0477ec8 100644
      coroutine_yield(NULL);
  
 diff --git a/src/spice-widget.c b/src/spice-widget.c
-index 9ccb007..9cf058d 100644
+index 9788367..28db434 100644
 --- a/src/spice-widget.c
 +++ b/src/spice-widget.c
 @@ -55,6 +55,7 @@
@@ -545,34 +538,34 @@ index 9ccb007..9cf058d 100644
  
  
  /**
-@@ -488,7 +489,7 @@ static void spice_display_dispose(GObject *obj)
+@@ -484,7 +485,7 @@ static void spice_display_dispose(GObject *obj)
+     g_clear_object(&d->session);
      d->gtk_session = NULL;
  
-     if (d->key_delayed_id) {
--        g_source_remove(d->key_delayed_id);
-+        g_spice_source_remove(d->key_delayed_id);
-         d->key_delayed_id = 0;
-     }
+-    g_clear_handle_id(&d->key_delayed_id, g_source_remove);
++    g_clear_handle_id(&d->key_delayed_id, g_spice_source_remove);
  
-@@ -1577,7 +1578,7 @@ static void key_press_and_release(SpiceDisplay *display)
-     d->key_delayed_scancode = 0;
- 
-     if (d->key_delayed_id) {
--        g_source_remove(d->key_delayed_id);
-+        g_spice_source_remove(d->key_delayed_id);
-         d->key_delayed_id = 0;
-     }
+     G_OBJECT_CLASS(spice_display_parent_class)->dispose(obj);
  }
-@@ -1594,7 +1595,7 @@ static gboolean key_press_delayed(gpointer data)
+@@ -1570,7 +1571,7 @@ static void key_press_and_release(SpiceDisplay *display)
+     spice_inputs_channel_key_press_and_release(d->inputs, d->key_delayed_scancode);
      d->key_delayed_scancode = 0;
  
-     if (d->key_delayed_id) {
--        g_source_remove(d->key_delayed_id);
-+        g_spice_source_remove(d->key_delayed_id);
-         d->key_delayed_id = 0;
-     }
+-    g_clear_handle_id(&d->key_delayed_id, g_source_remove);
++    g_clear_handle_id(&d->key_delayed_id, g_spice_source_remove);
+ }
  
-@@ -1647,7 +1648,7 @@ static void send_key(SpiceDisplay *display, int scancode, SendKeyType type, gboo
+ static gboolean key_press_delayed(gpointer data)
+@@ -1584,7 +1585,7 @@ static gboolean key_press_delayed(gpointer data)
+     spice_inputs_channel_key_press(d->inputs, d->key_delayed_scancode);
+     d->key_delayed_scancode = 0;
+ 
+-    g_clear_handle_id(&d->key_delayed_id, g_source_remove);
++    g_clear_handle_id(&d->key_delayed_id, g_spice_source_remove);
+ 
+     return G_SOURCE_REMOVE;
+ }
+@@ -1635,7 +1636,7 @@ static void send_key(SpiceDisplay *display, int scancode, SendKeyType type, gboo
              d->keypress_delay != 0 &&
              !(d->key_state[i] & m)) {
              g_warn_if_fail(d->key_delayed_id == 0);
@@ -582,7 +575,7 @@ index 9ccb007..9cf058d 100644
          } else
              spice_inputs_channel_key_press(d->inputs, scancode);
 diff --git a/src/usb-acl-helper.c b/src/usb-acl-helper.c
-index e0f5eb0..bf38499 100644
+index 9a9e0f5..bc7dc87 100644
 --- a/src/usb-acl-helper.c
 +++ b/src/usb-acl-helper.c
 @@ -25,6 +25,7 @@
@@ -593,7 +586,7 @@ index e0f5eb0..bf38499 100644
  
  struct _SpiceUsbAclHelperPrivate {
      GTask *task;
-@@ -208,7 +209,7 @@ void spice_usb_acl_helper_open_acl_async(SpiceUsbAclHelper *self,
+@@ -207,7 +208,7 @@ void spice_usb_acl_helper_open_acl_async(SpiceUsbAclHelper *self,
          g_task_return_error(task, err);
          goto done;
      }
@@ -603,7 +596,7 @@ index e0f5eb0..bf38499 100644
      priv->in_ch = g_io_channel_unix_new(in);
      g_io_channel_set_close_on_unref(priv->in_ch, TRUE);
 diff --git a/src/usb-device-manager.c b/src/usb-device-manager.c
-index e31000b..820a36a 100644
+index fef2046..a2edaf7 100644
 --- a/src/usb-device-manager.c
 +++ b/src/usb-device-manager.c
 @@ -38,6 +38,7 @@
@@ -614,7 +607,7 @@ index e31000b..820a36a 100644
  
  #include <glib/gi18n-lib.h>
  
-@@ -865,7 +866,7 @@ static void spice_usb_device_manager_hotplug_cb(void *user_data,
+@@ -862,7 +863,7 @@ static void spice_usb_device_manager_hotplug_cb(void *user_data,
      args->manager = g_object_ref(manager);
      args->device = spice_usb_backend_device_ref(dev);
      args->added = added;
@@ -636,3 +629,6 @@ index 18a1764..f866bc4 100644
  
          g_clear_object(&self->task);
      }
+-- 
+2.56.0
+

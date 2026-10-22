@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Er Gibbio <gibbio@pm.me>
 Date: Tue, 20 Oct 2026 20:36:20 +0200
-Subject: [PATCH 11/11] display: report the display delay to servers that send
+Subject: [PATCH 11/21] display: report the display delay to servers that send
  their real time
 
 spice-server 0.16 ("Send real time to client") no longer runs the client's
@@ -22,10 +22,10 @@ change.
  1 file changed, 10 insertions(+), 1 deletion(-)
 
 diff --git a/src/channel-display.c b/src/channel-display.c
-index 13deae1..7169484 100644
+index ad2993e..dbbe155 100644
 --- a/src/channel-display.c
 +++ b/src/channel-display.c
-@@ -2088,6 +2088,15 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+@@ -2084,6 +2084,15 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
      shift = display_playout_shift(channel, margin);
      margin -= shift;
      st->shown_margin = margin;
@@ -41,7 +41,7 @@ index 13deae1..7169484 100644
      if (margin > 0) {
          SpiceSession *s = spice_channel_get_session(channel);
  
-@@ -2096,7 +2105,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+@@ -2092,7 +2101,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
              margin = 0;
          }
      }
@@ -50,3 +50,6 @@ index 13deae1..7169484 100644
  
      /* Let the video decoder queue the frames so it can optimize their
       * decoding and best decide if/when to drop them when they are late,
+-- 
+2.56.0
+

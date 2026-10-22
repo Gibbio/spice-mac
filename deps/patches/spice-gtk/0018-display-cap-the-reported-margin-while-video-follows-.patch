@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Er Gibbio <gibbio@pm.me>
 Date: Wed, 21 Oct 2026 22:03:27 +0200
-Subject: [PATCH 18/18] display: cap the reported margin while video follows
+Subject: [PATCH 18/21] display: cap the reported margin while video follows
  the audio, not for MJPEG
 
 Following the audio clock, a stream's margin is about the audio's delay,
@@ -21,10 +21,10 @@ with them.
  1 file changed, 23 insertions(+), 12 deletions(-)
 
 diff --git a/src/channel-display.c b/src/channel-display.c
-index 7aeb4bc..0ebdb70 100644
+index bdd54ac..bc199fd 100644
 --- a/src/channel-display.c
 +++ b/src/channel-display.c
-@@ -2195,18 +2195,29 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+@@ -2191,18 +2191,29 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
       * clock they set up, newer ones the delay the frame really gets, rather than a
       * client that seems unable to keep up: their rate control cuts the stream
       * whenever the reported delay is below -15 ms (to ~1 Mbit/s in our test). */

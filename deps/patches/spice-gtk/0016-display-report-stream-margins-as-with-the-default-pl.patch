@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Er Gibbio <gibbio@pm.me>
 Date: Wed, 21 Oct 2026 19:05:47 +0200
-Subject: [PATCH 16/16] display: report stream margins as with the default
+Subject: [PATCH 16/21] display: report stream margins as with the default
  playout delay, capped
 
 With the video played on the channel's own clock, a frame is shown
@@ -22,7 +22,7 @@ arriving late still lowers it. The statistics keep the real margins.
  1 file changed, 18 insertions(+), 3 deletions(-)
 
 diff --git a/src/channel-display.c b/src/channel-display.c
-index 605f9c7..7aeb4bc 100644
+index 8525dc9..bdd54ac 100644
 --- a/src/channel-display.c
 +++ b/src/channel-display.c
 @@ -64,6 +64,9 @@
@@ -35,7 +35,7 @@ index 605f9c7..7aeb4bc 100644
  struct _SpiceDisplayChannelPrivate {
      GHashTable                  *surfaces;
      display_surface             *primary;
-@@ -1136,7 +1139,7 @@ static void spice_display_channel_init(SpiceDisplayChannel *channel)
+@@ -1131,7 +1134,7 @@ static void spice_display_channel_init(SpiceDisplayChannel *channel)
      /* SPICE_STREAM_PLAYOUT_MS: how long after arrival to show a video frame when
       * no audio is playing (0 = always follow the server's timestamps) */
      const gchar *playout = g_getenv("SPICE_STREAM_PLAYOUT_MS");
@@ -44,7 +44,7 @@ index 605f9c7..7aeb4bc 100644
  }
  
  /* ------------------------------------------------------------------ */
-@@ -2162,7 +2165,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+@@ -2158,7 +2161,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
      display_stream *st = get_stream_by_id(channel, op->id);
      SpiceSession *session = spice_channel_get_session(channel);
      guint32 mmtime, playout_time;
@@ -53,7 +53,7 @@ index 605f9c7..7aeb4bc 100644
      SpiceFrame *frame;
  
      g_return_if_fail(st != NULL);
-@@ -2192,6 +2195,18 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+@@ -2188,6 +2191,18 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
       * clock they set up, newer ones the delay the frame really gets, rather than a
       * client that seems unable to keep up: their rate control cuts the stream
       * whenever the reported delay is below -15 ms (to ~1 Mbit/s in our test). */
@@ -72,7 +72,7 @@ index 605f9c7..7aeb4bc 100644
      margin_report = MAX(margin_report, margin);
      if (margin > 0) {
          SpiceSession *s = spice_channel_get_session(channel);
-@@ -2216,7 +2231,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+@@ -2212,7 +2227,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
  
      if (c->enable_adaptive_streaming) {
          display_update_stream_report(SPICE_DISPLAY_CHANNEL(channel), op->id,

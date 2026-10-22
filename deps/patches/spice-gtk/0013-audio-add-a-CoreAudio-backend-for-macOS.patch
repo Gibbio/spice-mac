@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Er Gibbio <gibbio@pm.me>
 Date: Wed, 21 Oct 2026 13:05:23 +0200
-Subject: [PATCH 13/13] audio: add a CoreAudio backend for macOS
+Subject: [PATCH 13/21] audio: add a CoreAudio backend for macOS
 
 GStreamer's osxaudiosink buffers 200 ms by default, so sound came ~220 ms
 after it arrived and, with the guest playing sound for a while, the video
@@ -82,7 +82,7 @@ index 908e3c9..3fad53b 100644
    spice_client_glib_sources += ['usb-acl-helper.c',
                                  'usb-acl-helper.h']
 diff --git a/src/spice-audio.c b/src/spice-audio.c
-index 8a5714e..d84fbee 100644
+index 971fdce..07051b2 100644
 --- a/src/spice-audio.c
 +++ b/src/spice-audio.c
 @@ -41,6 +41,9 @@
@@ -95,7 +95,7 @@ index 8a5714e..d84fbee 100644
  
  G_STATIC_ASSERT(sizeof(SpiceAudioClass) == sizeof(GObjectClass) + 11 * sizeof(gpointer));
  
-@@ -144,6 +147,12 @@ static void connect_channel(SpiceAudio *self, SpiceChannel *channel)
+@@ -138,6 +141,12 @@ static void connect_channel(SpiceAudio *self, SpiceChannel *channel)
  {
      if (channel->priv->state != SPICE_CHANNEL_STATE_UNCONNECTED)
          return;
@@ -108,7 +108,7 @@ index 8a5714e..d84fbee 100644
  
      if (SPICE_AUDIO_GET_CLASS(self)->connect_channel(self, channel))
          spice_channel_connect(channel);
-@@ -233,7 +242,13 @@ SpiceAudio *spice_audio_new_priv(SpiceSession *session, GMainContext *context,
+@@ -227,7 +236,13 @@ SpiceAudio *spice_audio_new_priv(SpiceSession *session, GMainContext *context,
      if (name == NULL)
          name = g_get_application_name();
  
@@ -1308,3 +1308,6 @@ index 0000000..4f7af3a
 +                                    GMainContext *context, const char *name);
 +
 +G_END_DECLS
+-- 
+2.56.0
+

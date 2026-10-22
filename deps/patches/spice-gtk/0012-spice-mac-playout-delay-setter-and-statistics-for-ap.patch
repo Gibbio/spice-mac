@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Er Gibbio <gibbio@pm.me>
 Date: Wed, 21 Oct 2026 12:30:05 +0200
-Subject: [PATCH 12/12] spice-mac: playout delay setter and statistics for
+Subject: [PATCH 12/21] spice-mac: playout delay setter and statistics for
  applications
 
 For SpiceMac's menu and statistics overlay, all for the main context and
@@ -48,10 +48,10 @@ index 0a1c5ec..9abfad7 100644
      double   shown_late_sum;    /* ms shown after the frame's time on the playout clock */
      int32_t  shown_late_max;
 diff --git a/src/channel-display.c b/src/channel-display.c
-index 7169484..b40415f 100644
+index dbbe155..a27b504 100644
 --- a/src/channel-display.c
 +++ b/src/channel-display.c
-@@ -1510,16 +1510,19 @@ static display_stream *display_stream_create(SpiceChannel *channel,
+@@ -1506,16 +1506,19 @@ static display_stream *display_stream_create(SpiceChannel *channel,
  #ifdef HAVE_BUILTIN_MJPEG
      case SPICE_VIDEO_CODEC_TYPE_MJPEG:
          st->video_decoder = create_mjpeg_decoder(codec_type, st);
@@ -71,7 +71,7 @@ index 7169484..b40415f 100644
          break;
      }
      if (st->video_decoder == NULL) {
-@@ -1638,6 +1641,7 @@ void stream_display_frame(display_stream *st, SpiceFrame *frame,
+@@ -1634,6 +1637,7 @@ void stream_display_frame(display_stream *st, SpiceFrame *frame,
  {
      gint64 now = g_get_monotonic_time();
      int32_t late = spice_mmtime_diff(stream_get_time(st), frame->mm_time);
@@ -79,7 +79,7 @@ index 7169484..b40415f 100644
      if (st->shown_last != 0) {
          double interval = (now - st->shown_last) / 1000.0;
          st->shown_count++;
-@@ -2058,6 +2062,83 @@ static gint32 display_playout_shift(SpiceChannel *channel, gint32 margin)
+@@ -2054,6 +2058,83 @@ static gint32 display_playout_shift(SpiceChannel *channel, gint32 margin)
      return c->playout_shift;
  }
  
@@ -164,7 +164,7 @@ index 7169484..b40415f 100644
  static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
  {
 diff --git a/src/channel-display.h b/src/channel-display.h
-index f6c0799..f27ba35 100644
+index e80acea..743acf7 100644
 --- a/src/channel-display.h
 +++ b/src/channel-display.h
 @@ -181,6 +181,46 @@ SPICE_GTK_AVAILABLE_IN_0_38
@@ -215,10 +215,10 @@ index f6c0799..f27ba35 100644
  GType           spice_gl_scanout_get_type     (void);
  SPICE_GTK_AVAILABLE_IN_0_31
 diff --git a/src/channel-playback.c b/src/channel-playback.c
-index b038acc..de8f79d 100644
+index e32bf03..0c2d549 100644
 --- a/src/channel-playback.c
 +++ b/src/channel-playback.c
-@@ -468,6 +468,26 @@ void spice_playback_channel_set_delay(SpicePlaybackChannel *channel, guint32 del
+@@ -466,6 +466,26 @@ void spice_playback_channel_set_delay(SpicePlaybackChannel *channel, guint32 del
      }
  }
  
@@ -246,10 +246,10 @@ index b038acc..de8f79d 100644
  gboolean spice_playback_channel_is_active(SpicePlaybackChannel *channel)
  {
 diff --git a/src/channel-playback.h b/src/channel-playback.h
-index 390ce33..5f24562 100644
+index 136f8de..07b4ccb 100644
 --- a/src/channel-playback.h
 +++ b/src/channel-playback.h
-@@ -75,4 +75,21 @@ GType           spice_playback_channel_get_type(void);
+@@ -75,5 +75,22 @@ GType           spice_playback_channel_get_type(void);
  SPICE_GTK_AVAILABLE_IN_0_4
  void            spice_playback_channel_set_delay(SpicePlaybackChannel *channel, guint32 delay_ms);
  
@@ -270,6 +270,7 @@ index 390ce33..5f24562 100644
 +SPICE_GTK_AVAILABLE_IN_0_43
 +void            spice_playback_channel_get_stats(SpicePlaybackChannel *channel, SpicePlaybackStats *stats);
 +
+ G_DEFINE_AUTOPTR_CLEANUP_FUNC(SpicePlaybackChannel, g_object_unref)
  G_END_DECLS
 diff --git a/src/map-file-glib b/src/map-file-glib
 index 1aff6a8..48d08e7 100644
@@ -303,10 +304,10 @@ index 1aff6a8..48d08e7 100644
  spice_playback_channel_set_delay;
  spice_port_channel_event;
 diff --git a/src/spice-channel.c b/src/spice-channel.c
-index 66b3a06..f3c96fc 100644
+index 6c5c4e8..0732712 100644
 --- a/src/spice-channel.c
 +++ b/src/spice-channel.c
-@@ -2585,6 +2585,35 @@ const GError* spice_channel_get_error(SpiceChannel *self)
+@@ -2582,6 +2582,35 @@ const GError* spice_channel_get_error(SpiceChannel *self)
      return c->error;
  }
  
@@ -343,14 +344,18 @@ index 66b3a06..f3c96fc 100644
  static void *spice_channel_coroutine(void *data)
  {
 diff --git a/src/spice-channel.h b/src/spice-channel.h
-index 77eac0b..bb24ef3 100644
+index a7f1589..2b7bb4f 100644
 --- a/src/spice-channel.h
 +++ b/src/spice-channel.h
-@@ -157,4 +157,7 @@ gint spice_channel_string_to_type(const gchar *str);
+@@ -157,5 +157,8 @@ gint spice_channel_string_to_type(const gchar *str);
  SPICE_GTK_AVAILABLE_IN_0_24
  const GError* spice_channel_get_error(SpiceChannel *channel);
  
 +SPICE_GTK_AVAILABLE_IN_0_43
 +gboolean spice_channel_get_tls_info(SpiceChannel *channel, const gchar **version, const gchar **cipher);
 +
+ G_DEFINE_AUTOPTR_CLEANUP_FUNC(SpiceChannel, g_object_unref)
  G_END_DECLS
+-- 
+2.56.0
+

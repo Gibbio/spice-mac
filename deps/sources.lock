@@ -21,13 +21,13 @@ glib             2.88.4   https://download.gnome.org/sources/glib/2.88/glib-2.88
 openssl          3.5.9    https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz                603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
 pixman           0.46.4   https://www.cairographics.org/releases/pixman-0.46.4.tar.xz                                            a098c33924754ad43f981b740f6d576c70f9ed1006e12221b1845431ebce1239
 libjpeg-turbo    3.1.4.1  https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.1.4.1/libjpeg-turbo-3.1.4.1.tar.gz  ecae8008e2cc9ade2f2c1bb9d5e6d4fb73e7c433866a056bd82980741571a022
-opus             1.5.2    https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz                                             65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1
+opus             1.6.1    https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz                                             6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
 json-glib        1.10.8   https://download.gnome.org/sources/json-glib/1.10/json-glib-1.10.8.tar.xz                              55c5c141a564245b8f8fbe7698663c87a45a7333c2a2c56f06f811ab73b212dd
 spice-protocol   master   git+https://gitlab.freedesktop.org/spice/spice-protocol.git 499cc8326a672e9e5747efc017319b19e1594b42
 libusb           1.0.30   https://github.com/libusb/libusb/releases/download/v1.0.30/libusb-1.0.30.tar.bz2                       fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf
 usbredir         main     git+https://gitlab.freedesktop.org/spice/usbredir.git f4406c506726853d1795eba428256b3922e1a6ad
 libucontext      1.5.2    https://github.com/kaniini/libucontext/archive/refs/tags/libucontext-1.5.2.tar.gz                          9230397327bbf580e04c9456d1509e9af19599c7f6deca7f75969ece6e9d598e
-spice-gtk        master   git+https://gitlab.freedesktop.org/spice/spice-gtk.git 5f261796aefe9deedd17e80a837f13949028fba5
+spice-gtk        master   git+https://gitlab.freedesktop.org/spice/spice-gtk.git 112f4802357f6153b60c6476d2ec83453c18703e
 
 # Build-time only (never shipped): spice-common's protocol code generator.
 pyparsing        3.3.3    https://files.pythonhosted.org/packages/38/bb/d215ee7c73b61497b28a5503f9f53523f294fcc936762b7caf90e0c1c2b5/pyparsing-3.3.3-py3-none-any.whl ece8c00a69cf01b45d0b1dedabb469c90d8caf996d4fda40f147627a122849a4

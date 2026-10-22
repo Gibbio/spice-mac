@@ -93,6 +93,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - CocoaSpice re-based onto upstream (utmapp/CocoaSpice d8d29fc), bringing in the
   per-iteration autorelease pool on the SPICE thread (Objective-C objects created by
   SPICE callbacks were never released) and a port write-buffer lifetime fix.
+- spice-gtk follows master at 112f480 (upstream's code clean-ups, no change in
+  behaviour), and Opus is 1.6.1.
 - License notices updated for the new stack: OpenSSL 3 is Apache-2.0; PCRE2 and
   libucontext (ISC) are listed.
 

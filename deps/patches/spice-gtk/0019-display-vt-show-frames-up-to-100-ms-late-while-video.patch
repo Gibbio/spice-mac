@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Er Gibbio <gibbio@pm.me>
 Date: Wed, 21 Oct 2026 22:08:16 +0200
-Subject: [PATCH 19/19] display, vt: show frames up to 100 ms late while video
+Subject: [PATCH 19/21] display, vt: show frames up to 100 ms late while video
  follows the audio
 
 Following the audio clock, a frame has only the audio's delay to arrive in
@@ -45,7 +45,7 @@ index 360c104..5655a95 100644
                  decoder->timer_id = g_spice_timeout_add(late < 0 ? -late : 0,
                                                          vt_decoder_display_picture, decoder);
 diff --git a/src/channel-display.c b/src/channel-display.c
-index 0ebdb70..5b0b75d 100644
+index bc199fd..9b07b04 100644
 --- a/src/channel-display.c
 +++ b/src/channel-display.c
 @@ -66,6 +66,9 @@
@@ -58,7 +58,7 @@ index 0ebdb70..5b0b75d 100644
  
  struct _SpiceDisplayChannelPrivate {
      GHashTable                  *surfaces;
-@@ -1645,6 +1648,19 @@ guint32 stream_get_time(display_stream *st)
+@@ -1641,6 +1644,19 @@ guint32 stream_get_time(display_stream *st)
      return monotonic_ms() + c->playout_base;
  }
  
@@ -78,7 +78,7 @@ index 0ebdb70..5b0b75d 100644
  /* coroutine or main context */
  G_GNUC_INTERNAL
  void stream_dropped_frame_on_playback(display_stream *st)
-@@ -2217,6 +2233,10 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+@@ -2213,6 +2229,10 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
          server_margin = MAX(margin_report, MIN(margin - c->playout_target, 0) + PLAYOUT_DEFAULT_MS);
      } else {
          server_margin = MIN(MAX(margin_report, margin), PLAYOUT_DEFAULT_MS);

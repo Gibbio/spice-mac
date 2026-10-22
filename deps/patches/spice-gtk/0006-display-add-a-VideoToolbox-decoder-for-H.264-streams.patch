@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: spice-mac <spice-mac@localhost>
 Date: Tue, 20 Oct 2026 07:52:47 +0200
-Subject: [PATCH 6/9] display: add a VideoToolbox decoder for H.264 streams on
- macOS
+Subject: [PATCH 06/21] display: add a VideoToolbox decoder for H.264 streams
+ on macOS
 
 Decode H.264 video streams with VideoToolbox (hardware, no GStreamer needed):
 frames are decoded synchronously as they arrive and the BGRA pictures wait for
@@ -597,10 +597,10 @@ index 0000000..44d75f9
 +    return (VideoDecoder *)decoder;
 +}
 diff --git a/src/channel-display.c b/src/channel-display.c
-index db4f6ad..bbc170d 100644
+index 6997f9d..47a6ddb 100644
 --- a/src/channel-display.c
 +++ b/src/channel-display.c
-@@ -991,6 +991,13 @@ static void spice_display_channel_set_capabilities(SpiceChannel *channel)
+@@ -987,6 +987,13 @@ static void spice_display_channel_set_capabilities(SpiceChannel *channel)
      spice_channel_set_capability(channel, SPICE_DISPLAY_CAP_CODEC_MJPEG);
  #endif
      for (i = 1; i < G_N_ELEMENTS(gst_opts); i++) {
@@ -614,7 +614,7 @@ index db4f6ad..bbc170d 100644
          if (gstvideo_has_codec(i)) {
              /* use extra parenthesis to avoid an unwanted macro expansion */
              (spice_channel_set_capability)(channel, gst_opts[i].cap);
-@@ -1000,6 +1007,39 @@ static void spice_display_channel_set_capabilities(SpiceChannel *channel)
+@@ -996,6 +1003,39 @@ static void spice_display_channel_set_capabilities(SpiceChannel *channel)
      }
  }
  
@@ -653,8 +653,8 @@ index db4f6ad..bbc170d 100644
 +
  static void destroy_surface(gpointer data)
  {
-     display_surface *surface = data;
-@@ -1191,6 +1231,9 @@ static void spice_display_channel_up(SpiceChannel *channel)
+     g_autofree display_surface *surface = data;
+@@ -1187,6 +1227,9 @@ static void spice_display_channel_up(SpiceChannel *channel)
      if (preferred_compression != SPICE_IMAGE_COMPRESSION_INVALID) {
          spice_display_channel_change_preferred_compression(channel, preferred_compression);
      }
@@ -664,7 +664,7 @@ index db4f6ad..bbc170d 100644
  }
  
  #define DRAW(type) {                                                    \
-@@ -1395,6 +1438,12 @@ static display_stream *display_stream_create(SpiceChannel *channel,
+@@ -1391,6 +1434,12 @@ static display_stream *display_stream_create(SpiceChannel *channel,
      region_init(&st->region);
      display_update_stream_region(st);
  
@@ -677,7 +677,7 @@ index db4f6ad..bbc170d 100644
      switch (codec_type) {
  #ifdef HAVE_BUILTIN_MJPEG
      case SPICE_VIDEO_CODEC_TYPE_MJPEG:
-@@ -1402,6 +1451,12 @@ static display_stream *display_stream_create(SpiceChannel *channel,
+@@ -1398,6 +1447,12 @@ static display_stream *display_stream_create(SpiceChannel *channel,
          break;
  #endif
      default:
@@ -705,3 +705,6 @@ index 7289f8d..908e3c9 100644
  if spice_gtk_has_polkit
    spice_client_glib_sources += ['usb-acl-helper.c',
                                  'usb-acl-helper.h']
+-- 
+2.56.0
+

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: spice-mac <spice-mac@localhost>
 Date: Mon, 19 Oct 2026 22:17:52 +0200
-Subject: [PATCH 5/9] display: build without <drm/drm_fourcc.h>
+Subject: [PATCH 05/21] display: build without <drm/drm_fourcc.h>
 
 0.43 includes the Linux DRM header unconditionally for the GL scanout path,
 which breaks the build on macOS. Only DRM_FORMAT_MOD_INVALID is used from it,
@@ -11,7 +11,7 @@ so include the header where it exists and define that one constant otherwise.
  1 file changed, 7 insertions(+)
 
 diff --git a/src/channel-display.c b/src/channel-display.c
-index 947ca15..db4f6ad 100644
+index c895ff5..6997f9d 100644
 --- a/src/channel-display.c
 +++ b/src/channel-display.c
 @@ -22,8 +22,15 @@
@@ -30,3 +30,6 @@ index 947ca15..db4f6ad 100644
  
  #include "spice-client.h"
  #include "spice-common.h"
+-- 
+2.56.0
+

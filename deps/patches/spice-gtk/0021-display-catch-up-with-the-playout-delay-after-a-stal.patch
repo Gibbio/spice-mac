@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Er Gibbio <gibbio@pm.me>
+Date: Thu, 22 Oct 2026 12:03:15 +0200
+Subject: [PATCH 21/21] display: catch up with the playout delay after a stall,
+ 10% fast
+
+On its own clock, video is shown `target` ms after arrival. A stall of
+the network or of the SPICE thread delivers the next frames in a burst:
+the first drops the shift by the whole stall, and the burst's later
+frames, and every frame after them, then had that much more delay. The
+shift grew back 5 ms per second: a 100 ms Wi-Fi pause kept video 85 ms
+later for 13 s, a 420 ms stall 400 ms later for over a minute.
+
+Now it grows back frame by frame, taking 10% off each frame's interval,
+as WebRTC's video timing does (at most 100 ms per second), up to what
+every frame of the last second allows. A frame never moves before the
+one ahead of it, and the steady delay stays the same. In a model of
+30 fps arrivals with 20 ms jitter: back within 30 ms of the target 2 s
+after a 100 ms pause and 5.4 s after a 420 ms stall.
+---
+ src/channel-display.c | 43 ++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 34 insertions(+), 9 deletions(-)
+
+diff --git a/src/channel-display.c b/src/channel-display.c
+index 016a542..f428699 100644
+--- a/src/channel-display.c
++++ b/src/channel-display.c
+@@ -97,6 +97,9 @@ struct _SpiceDisplayChannelPrivate {
+     gint32                      playout_shift;
+     gint32                      playout_window_min;
+     gint64                      playout_window_end;
++    gint32                      playout_grow_to;    /* the shift the last window allows */
++    guint32                     playout_last_mm;    /* the last frame's time */
++    gint32                      playout_credit;     /* catch-up earned, in 1/100 ms */
+     /* the preferred video codecs, sent once the server is ready for them: see
+      * spice_display_send_client_preferred_video_codecs() */
+     gint                        preferred_codecs[SPICE_VIDEO_CODEC_TYPE_ENUM_END];
+@@ -1978,7 +1981,7 @@ void spice_frame_free(SpiceFrame *frame)
+     g_free(frame);
+ }
+ 
+-#define PLAYOUT_GROW_MS 5       /* per second; far below a frame interval */
++#define PLAYOUT_CATCHUP_PERCENT 10  /* of the frames' own time: see display_playout_shift() */
+ #define PLAYOUT_RESYNC_MS 1000  /* slack this far above the target: the server's clock moved */
+ #define PLAYOUT_AUDIO_HOLD (2 * G_USEC_PER_SEC)
+ 
+@@ -2057,9 +2060,17 @@ static void display_playout_mode(SpiceChannel *channel)
+ /* How many ms to take off a frame's timestamp, given its slack on the playout
+  * clock: show it `target` ms after arrival, keeping the frames' relative timing.
+  * The shift comes from the smallest slack seen (one value per channel, as streams
+- * come and go), drops at once if a frame would otherwise be late, and only creeps
+- * back up, a few ms per second. */
+-static gint32 display_playout_shift(SpiceChannel *channel, gint32 margin)
++ * come and go) and drops at once if a frame would otherwise be late. Late frames
++ * mostly come in a burst after a stall of the network or of this thread, and the
++ * burst's later frames then have the whole stall as slack. The shift grows back,
++ * up to what every frame of the last second allows, by taking
++ * PLAYOUT_CATCHUP_PERCENT off each frame's interval: video plays 10% fast until
++ * the delay is down again (WebRTC's video timing moves its delay by at most
++ * 100 ms per second the same way), and no frame moves before the one ahead of
++ * it. At the 5 ms per second this grew by before, a 100 ms Wi-Fi pause kept
++ * video 85 ms later for 13 s, and a 420 ms stall 400 ms later for over a
++ * minute. */
++static gint32 display_playout_shift(SpiceChannel *channel, gint32 margin, guint32 mm_time)
+ {
+     SpiceDisplayChannelPrivate *c = SPICE_DISPLAY_CHANNEL(channel)->priv;
+     gint64 now = g_get_monotonic_time();
+@@ -2081,18 +2092,32 @@ static gint32 display_playout_shift(SpiceChannel *channel, gint32 margin)
+         CHANNEL_DEBUG(channel, "playout: shift %d (margin %d)", c->playout_shift, margin);
+         c->playout_window_min = margin;
+         c->playout_window_end = now + G_USEC_PER_SEC;
++        c->playout_grow_to = c->playout_shift;
++        c->playout_last_mm = mm_time;
++        c->playout_credit = 0;
+         c->playout_valid = TRUE;
+         return c->playout_shift;
+     }
+     c->playout_window_min = MIN(c->playout_window_min, margin);
+     if (now >= c->playout_window_end) {
+-        gint32 want = c->playout_window_min - c->playout_target;
+-        if (want > c->playout_shift) {
+-            c->playout_shift += MIN(want - c->playout_shift, PLAYOUT_GROW_MS);
+-        }
++        c->playout_grow_to = c->playout_window_min - c->playout_target;
+         c->playout_window_min = G_MAXINT32;
+         c->playout_window_end = now + G_USEC_PER_SEC;
+     }
++    /* the frames of this window so far bound it too */
++    gint32 room = MIN(c->playout_grow_to, c->playout_window_min - c->playout_target) -
++                  c->playout_shift;
++    gint32 elapsed = spice_mmtime_diff(mm_time, c->playout_last_mm);
++    c->playout_last_mm = mm_time;
++    if (room > 0 && elapsed > 0) {
++        c->playout_credit += elapsed * PLAYOUT_CATCHUP_PERCENT;
++        gint32 step = MIN(room, c->playout_credit / 100);
++        c->playout_shift += step;
++        /* keep only the fraction of a ms: no frame takes more than its own share */
++        c->playout_credit = MIN(c->playout_credit - step * 100, 99);
++    } else {
++        c->playout_credit = 0;
++    }
+     return c->playout_shift;
+ }
+ 
+@@ -2227,7 +2252,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+ 
+     margin_report = op->multi_media_time - mmtime;
+     margin = op->multi_media_time - playout_time;
+-    shift = display_playout_shift(channel, margin);
++    shift = display_playout_shift(channel, margin, op->multi_media_time);
+     margin -= shift;
+     st->shown_margin = margin;
+     /* spice-server 0.16 sends its real time instead of running our clock
+-- 
+2.56.0
+

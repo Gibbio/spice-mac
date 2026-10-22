@@ -119,6 +119,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the cap (0018); and frames up to 100 ms late are shown then rather than dropped
   (0019). With a continuous tone in the guest: 30.7 fps, no dropped frames, one
   bit-rate cut.
+- **Video stayed later than its Video Delay long after a stall.** Frames held up
+  by a pause of the network or of the SPICE thread arrive in a burst, and the
+  delay grew to show them in order, then shrank back 5 ms per second: in a
+  45-minute H.264 session, ~100 ms Wi-Fi pauses kept the video 80–90 ms later
+  for 12–14 s each, and a 420 ms stall 400 ms later for over a minute. The delay
+  now shrinks by up to 100 ms per second, the video playing up to 10% fast
+  meanwhile, as WebRTC does, never out of order. In a model of the client's
+  timing (30 fps, 20 ms of jitter): back within 30 ms of the Video Delay 2 s
+  after a 100 ms pause and 5.4 s after a 420 ms stall (patch 0021).
 - **The VideoToolbox decoder dropped frames 1–9 ms late** (one every 2–3 s on
   the node's H.264), each a visible hitch and, reported to the server, a halved
   bit rate. Frames up to 15 ms late are now shown (patch 0015).

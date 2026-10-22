@@ -27,7 +27,7 @@ Keep in mind before trying any of them:
 | 0 | nothing (Proxmox VE 9, spice-server 0.15.2) | MJPEG | 23 | 15 Mbit/s (37–50 with noise) | 5–9% | — |
 | 1 | + `gstreamer1.0-plugins-ugly` (x264) | H.264, software | 30.7 | 6.6 Mbit/s (59 with noise) | 37% (48% with noise) | 0010 |
 | 2 | + spice-server master, own package | H.264, software | 30.8 | 5.6 Mbit/s | 38% | 0010, 0011 |
-| 3 | + VA-API (Quick Sync), local patches | H.264, GPU | 29.7 | 3.2 Mbit/s | 7% | 0010, 0011, 0016, 0023 |
+| 3 | + VA-API (Quick Sync), local patches | H.264, GPU | 29.7 | 3.2 Mbit/s | 7% | 0010, 0011, 0016, 0023, 0024 |
 
 The client patches are in `deps/patches/spice-gtk/`, and current SpiceMac builds
 have them. H.264 is still opt-in: turn on **Connection ▸ Prefer H.264 Video**
@@ -272,7 +272,10 @@ margins SpiceMac reported before it, down to ~0.1 Mbit/s and 3 fps within a
 minute; with it, 30 fps for minutes, also after changing Video Delay from 50 to
 30 ms. And 0023 when sound plays with Sync Video to Audio off: the reports then
 followed the audio's delay, and the rate control cut its bit rate limit from 74
-to 15.6 Mbit/s in 6 minutes.
+to 15.6 Mbit/s in 6 minutes. And 0024 against Wi-Fi jitter: frames a few ms later
+than usual lowered the limit, from 19.7 to 7.9 Mbit/s in a new stream's first 4 s,
+while the server's first estimate of the guest's frame rate (12 fps for a video
+at 29) asks for more margin than the client reports.
 
 ### Frames bigger than the stream
 

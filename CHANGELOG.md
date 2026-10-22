@@ -144,6 +144,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   raised it again: the stream reports followed the audio's delay, which the
   session clock carries while sound plays. They now give the delay the video
   gets, as without sound (patch 0023): the limit did not move in the same test.
+- **Wi-Fi jitter lowered H.264's bit rate limit, mostly as a stream started:**
+  frames 1–13 ms later than usual took a new stream from 19.7 to 7.9 Mbit/s in
+  4 s. The server judges each report against one frame interval of the guest's
+  frame rate as it estimates it, and that estimate starts low (12 fps for a video
+  at 29) for the first 5 s. Stream reports now leave out frames up to 20 ms later
+  than usual (patch 0024): in 5 minutes of new streams the server lowered no
+  limit; later frames still count.
 - **The VideoToolbox decoder dropped frames 1–9 ms late** (one every 2–3 s on
   the node's H.264), each a visible hitch and, reported to the server, a halved
   bit rate. Frames up to 15 ms late are now shown (patch 0015).

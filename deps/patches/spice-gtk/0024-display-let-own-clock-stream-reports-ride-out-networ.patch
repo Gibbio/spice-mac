@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Er Gibbio <gibbio@pm.me>
+Date: Thu, 22 Oct 2026 20:42:09 +0200
+Subject: [PATCH 24/24] display: let own-clock stream reports ride out network
+ jitter
+
+On its own clock, video reports the margin the default delay gives: 50 ms,
+less by however much later than the target a frame arrives (0023).
+spice-server's GStreamer rate control lowers the bit rate on any fall in
+margin while it is below one frame interval of the guest's frame rate as
+the server estimates it, and a new stream's first estimate can be low for
+5 s (12 fps for a video at 29): falls of 1-7 ms took the limit down four
+steps and one of 13 ms halved it, 19.7 to 7.9 Mbit/s in 4 s. Against 50
+as the largest margin, a fall of 13 ms lowers the bit rate by a quarter
+even at 30 fps, and one of 17 ms halves it. On Wi-Fi, frames arrived 1-5
+ms later than the target in 7% of the reports, up to 13 ms in 23 min.
+
+Leave a frame up to 20 ms later than the target out of the reports. The
+server's model, replayed on those 23 min of reports, then takes no
+decision at all; later frames still lower the margin, and the margin
+still never exceeds 50, which keeps the server's audio rule (less bit
+rate when the audio margin falls below half its peak and well under the
+video margin) out of play.
+---
+ src/channel-display.c | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/src/channel-display.c b/src/channel-display.c
+index 334810d..f8d8631 100644
+--- a/src/channel-display.c
++++ b/src/channel-display.c
+@@ -66,6 +66,9 @@
+ 
+ /* SPICE_STREAM_PLAYOUT_MS's default: see display_playout_shift() */
+ #define PLAYOUT_DEFAULT_MS 50
++/* How much later than the target a frame may arrive before stream reports
++ * show it: see display_handle_stream_data() */
++#define PLAYOUT_REPORT_JITTER_MS 20
+ /* How late a frame may still be shown while video follows the audio: see
+  * stream_get_late_tolerance() */
+ #define PLAYOUT_AUDIO_LATE_MS 100
+@@ -2275,7 +2278,14 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+      *   clock count there: while audio plays it runs the audio's delay behind,
+      *   and its margin follows the audio buffer (~140 ms, 186 after a Wi-Fi
+      *   pause grew it): reported, it lowered the bit rate twice as the audio
+-     *   started and halved it at the pause, within 6 minutes;
++     *   started and halved it at the pause, within 6 minutes. Nor does a
++     *   frame arriving up to PLAYOUT_REPORT_JITTER_MS later than the target
++     *   (Wi-Fi jitter: 1-5 ms in 7% of the reports, up to 13 in 23 min): a
++     *   fall in margin of 1 ms lowers the bit rate while the server's estimate
++     *   of the guest's frame rate is below 20 fps, as a new stream's first one
++     *   can be for 5 s (12 fps for a video at 29), and against 50 one of 13 ms
++     *   lowers it by a quarter even at 30 fps; a stream went from 19.7 to 7.9
++     *   Mbit/s in 4 s;
+      * - following the audio, the margin is about the audio's delay, which
+      *   changes with the output device (~280 ms with AirPods, ~130 built in)
+      *   and peaks for a moment when it does: from 408 to 131 ms, the server
+@@ -2286,7 +2296,8 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+     if (st->video_decoder->codec_type == SPICE_VIDEO_CODEC_TYPE_MJPEG) {
+         server_margin = MAX(margin_report, margin);
+     } else if (c->playout_target > 0 && !c->playout_audio) {
+-        server_margin = MIN(margin - c->playout_target, 0) + PLAYOUT_DEFAULT_MS;
++        server_margin = MIN(margin - c->playout_target + PLAYOUT_REPORT_JITTER_MS, 0) +
++                        PLAYOUT_DEFAULT_MS;
+     } else {
+         server_margin = MIN(MAX(margin_report, margin), PLAYOUT_DEFAULT_MS);
+         /* a frame late by no more than the decoder still shows is no drop */
+-- 
+2.56.0
+

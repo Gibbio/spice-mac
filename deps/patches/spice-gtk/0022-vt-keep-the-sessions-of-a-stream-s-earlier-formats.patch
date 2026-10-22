@@ -1,0 +1,189 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Er Gibbio <gibbio@pm.me>
+Date: Thu, 22 Oct 2026 12:34:29 +0200
+Subject: [PATCH 22/22] vt: keep the sessions of a stream's earlier formats
+
+spice-server sends a frame bigger than the stream as is (a "sized"
+frame) when the guest draws more than the video at once, e.g. a counter
+next to it that changes every second, or a few more rows: the encoder
+restarts at the new size, and again at the old one with the next frame.
+The decoder made a new VideoToolbox session at each change: two a
+second, ~10 ms each on the main context and, a few times an hour, 200 to
+340 ms, a visible stall.
+
+Up to two sessions of earlier formats are now kept, most recently used
+first, and one that accepts the new format is used again. The frame that
+brings the change is a keyframe, so what the session decoded before does
+not matter. Sleep or a GPU switch invalidates them along with the
+current one.
+
+SPICE_DEBUG now also tells how long a session took to create, and the
+size and decode time of the first frame of a session against the
+average frame.
+---
+ src/channel-display-vt.c | 93 +++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 87 insertions(+), 6 deletions(-)
+
+diff --git a/src/channel-display-vt.c b/src/channel-display-vt.c
+index 5655a95..cf3df94 100644
+--- a/src/channel-display-vt.c
++++ b/src/channel-display-vt.c
+@@ -41,6 +41,13 @@
+  * period, 33 ms at 30 fps: a visible stutter where a few ms late is not. */
+ #define VT_LATE_TOLERANCE_MS 15
+ 
++/* Sessions kept for the formats a stream had before. spice-server sends a frame
++ * bigger than the stream as is (a "sized" frame) when the guest draws more than
++ * the video at once, e.g. a counter next to it that changes every second: the
++ * encoder restarts at the new size, and again at the old one with the next
++ * frame. That made two new sessions a second, ~10 ms each and up to 340 ms. */
++#define VT_SPARE_SESSIONS 2
++
+ typedef struct VTPicture {
+     SpiceFrame *frame;          /* mm_time and destination of the picture */
+     CVPixelBufferRef image;     /* decoded BGRA picture */
+@@ -52,6 +59,13 @@ typedef struct VTDecoder {
+     gboolean hevc;
+     VTDecompressionSessionRef session;
+     CMVideoFormatDescriptionRef format;
++    /* Sessions of earlier formats, most recently used first (or NULL). */
++    VTDecompressionSessionRef spares[VT_SPARE_SESSIONS];
++
++    /* For SPICE_DEBUG: whether the next decode is the first of its session, and
++     * the average size of the other frames. */
++    gboolean first_decode;
++    gsize frame_size_avg;
+ 
+     /* Latest parameter sets, NAL payloads without start codes. The server sends
+      * them with the first frame of a stream; they are cached so a session lost
+@@ -197,6 +211,53 @@ static void vt_destroy_session(VTDecoder *decoder)
+     }
+ }
+ 
++static void vt_destroy_spares(VTDecoder *decoder)
++{
++    for (int i = 0; i < VT_SPARE_SESSIONS; i++) {
++        if (decoder->spares[i] != NULL) {
++            VTDecompressionSessionInvalidate(decoder->spares[i]);
++            CFRelease(decoder->spares[i]);
++            decoder->spares[i] = NULL;
++        }
++    }
++}
++
++/* Moves the current session to the front of the spares, dropping the oldest. */
++static void vt_keep_session(VTDecoder *decoder)
++{
++    VTDecompressionSessionRef oldest = decoder->spares[VT_SPARE_SESSIONS - 1];
++
++    if (decoder->session == NULL) {
++        return;
++    }
++    if (oldest != NULL) {
++        VTDecompressionSessionInvalidate(oldest);
++        CFRelease(oldest);
++    }
++    memmove(&decoder->spares[1], &decoder->spares[0],
++            (VT_SPARE_SESSIONS - 1) * sizeof(decoder->spares[0]));
++    decoder->spares[0] = decoder->session;
++    decoder->session = NULL;
++}
++
++/* If a spare session accepts format, makes it the current one and the current one
++ * a spare. The frame that brings the format is a keyframe (the encoder has
++ * restarted), so what the spare decoded before does not matter. */
++static gboolean vt_reuse_spare(VTDecoder *decoder, CMVideoFormatDescriptionRef format)
++{
++    for (int i = 0; i < VT_SPARE_SESSIONS; i++) {
++        VTDecompressionSessionRef spare = decoder->spares[i];
++
++        if (spare != NULL && VTDecompressionSessionCanAcceptFormatDescription(spare, format)) {
++            memmove(&decoder->spares[1], &decoder->spares[0], i * sizeof(decoder->spares[0]));
++            decoder->spares[0] = decoder->session;
++            decoder->session = spare;
++            return TRUE;
++        }
++    }
++    return FALSE;
++}
++
+ static CFDictionaryRef vt_output_attributes(void)
+ {
+     /* BGRA matches what the canvas takes (the MJPEG decoder's JCS_EXT_BGRX);
+@@ -264,11 +325,19 @@ static gboolean vt_ensure_session(VTDecoder *decoder)
+         return TRUE;
+     }
+ 
+-    vt_destroy_session(decoder);
+     if (decoder->format != NULL) {
+         CFRelease(decoder->format);
+     }
+     decoder->format = format;
++    decoder->first_decode = TRUE;
++    CMVideoDimensions dim = CMVideoFormatDescriptionGetDimensions(format);
++    if (vt_reuse_spare(decoder, format)) {
++        SPICE_DEBUG("VideoToolbox: %s session %dx%d, kept from before",
++                    decoder->hevc ? "H.265" : "H.264", dim.width, dim.height);
++        return TRUE;
++    }
++    vt_keep_session(decoder);
++    gint64 start = g_get_monotonic_time();
+ 
+     const void *spec_keys[] = { kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder };
+     const void *spec_values[] = { kCFBooleanTrue };
+@@ -288,9 +357,8 @@ static gboolean vt_ensure_session(VTDecoder *decoder)
+         return FALSE;
+     }
+ 
+-    CMVideoDimensions dim = CMVideoFormatDescriptionGetDimensions(format);
+-    SPICE_DEBUG("VideoToolbox: %s session %dx%d", decoder->hevc ? "H.265" : "H.264",
+-                dim.width, dim.height);
++    SPICE_DEBUG("VideoToolbox: %s session %dx%d (%.1f ms)", decoder->hevc ? "H.265" : "H.264",
++                dim.width, dim.height, (g_get_monotonic_time() - start) / 1000.0);
+     return TRUE;
+ }
+ 
+@@ -327,18 +395,30 @@ static CVPixelBufferRef vt_decode_sample(VTDecoder *decoder, guint32 mm_time)
+     /* No kVTDecodeFrame_EnableAsynchronousDecompression: the output callback has
+      * run by the time this returns. */
+     VTDecodeInfoFlags info = 0;
++    gint64 start = g_get_monotonic_time();
+     OSStatus status = VTDecompressionSessionDecodeFrame(decoder->session, sample,
+                                                         kVTDecodeFrame_1xRealTimePlayback,
+                                                         NULL, &info);
+     CFRelease(sample);
++    if (decoder->first_decode) {
++        /* the keyframe a format change brings: how much bigger, how much slower */
++        SPICE_DEBUG("VideoToolbox: first frame of the session: %" G_GSIZE_FORMAT
++                    " bytes (others %" G_GSIZE_FORMAT " on average), decoded in %.1f ms",
++                    len, decoder->frame_size_avg, (g_get_monotonic_time() - start) / 1000.0);
++        decoder->first_decode = FALSE;
++    } else {
++        decoder->frame_size_avg = decoder->frame_size_avg == 0 ? len :
++                                  (decoder->frame_size_avg * 31 + len) / 32;
++    }
+     if (status == noErr) {
+         status = decoder->decode_status;
+     }
+     if (status == kVTInvalidSessionErr) {
+-        /* e.g. after sleep or a GPU switch: rebuild from the cached parameter
+-         * sets on the next frame. */
++        /* e.g. after sleep or a GPU switch, which invalidates the spare sessions
++         * too: rebuild from the cached parameter sets on the next frame. */
+         SPICE_DEBUG("VideoToolbox: session invalidated, recreating");
+         vt_destroy_session(decoder);
++        vt_destroy_spares(decoder);
+         decoder->params_changed = TRUE;
+     } else if (status != noErr) {
+         SPICE_DEBUG("VideoToolbox: decode error %d", (int)status);
+@@ -488,6 +568,7 @@ static void vt_decoder_destroy(VideoDecoder *video_decoder)
+     vt_decoder_drop_queue(decoder);
+     g_queue_free(decoder->pictures);
+     vt_destroy_session(decoder);
++    vt_destroy_spares(decoder);
+     if (decoder->format != NULL) {
+         CFRelease(decoder->format);
+     }
+-- 
+2.56.0
+

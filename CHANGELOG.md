@@ -128,6 +128,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   meanwhile, as WebRTC does, never out of order. In a model of the client's
   timing (30 fps, 20 ms of jitter): back within 30 ms of the Video Delay 2 s
   after a 100 ms pause and 5.4 s after a 420 ms stall (patch 0021).
+- **H.264 hitched when the guest drew something next to a video** in the same
+  frame, a counter or a progress bar: spice-server sends that frame bigger than
+  the stream, and its encoder restarts at the new size and again at the old one.
+  SpiceMac made a new VideoToolbox session at each change, two a second, ~10 ms
+  each on the thread that runs SPICE and, a few times an hour, 200–340 ms. It
+  now keeps the sessions of the stream's two previous sizes and uses them again
+  (patch 0022): in an hour of our test page, 2 sessions instead of one per
+  change. The key frame the server sends at each change is about 5 times a
+  normal frame (+28% of the stream there); a server patch in
+  [docs/server-side-video.md](docs/server-side-video.md) avoids them.
+- **With sound playing and Sync Video to Audio off, spice-server lowered H.264's
+  bit rate limit** as the sound started and at Wi-Fi pauses (from 74 to
+  15.6 Mbit/s in 6 minutes of our test, for a stream using ~3.8), and never
+  raised it again: the stream reports followed the audio's delay, which the
+  session clock carries while sound plays. They now give the delay the video
+  gets, as without sound (patch 0023): the limit did not move in the same test.
 - **The VideoToolbox decoder dropped frames 1–9 ms late** (one every 2–3 s on
   the node's H.264), each a visible hitch and, reported to the server, a halved
   bit rate. Frames up to 15 ms late are now shown (patch 0015).

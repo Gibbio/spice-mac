@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Er Gibbio <gibbio@pm.me>
+Date: Thu, 22 Oct 2026 15:28:54 +0200
+Subject: [PATCH 23/23] display: leave the session clock out of own-clock
+ stream reports
+
+On its own clock, video reported the later of the session-clock margin
+and the margin the default delay gives (0016). While audio plays the
+session clock runs the audio's delay behind, so the session-clock margin
+is about that delay and follows the audio buffer: ~140 ms, 186 after a
+Wi-Fi pause grew the buffer, ~235 for a moment as the audio started.
+spice-server's GStreamer rate control judges each report against the
+largest one the stream has had: it lowered the bit rate twice as the
+audio started and halved it at the pause, within 6 minutes (74 to 15.6
+Mbit/s as a limit; the stream used ~3.8), and does not raise the limit
+while the stream uses less than it.
+
+Report only the default delay's margin there, as without audio: at most
+50 ms, lower for a frame shown sooner than the target.
+---
+ src/channel-display.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/channel-display.c b/src/channel-display.c
+index f428699..334810d 100644
+--- a/src/channel-display.c
++++ b/src/channel-display.c
+@@ -2271,7 +2271,11 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+      *   its slack: a viewer's choice of target (Video Delay) and a frame that
+      *   came early are no news. Uncapped, ~150 ms during a stream's first
+      *   second, then 50, took H.264 to ~0.1 Mbit/s and 3 fps within a minute;
+-     *   a change from 80 to 30 ms halved the bit rate;
++     *   a change from 80 to 30 ms halved the bit rate. Nor does the session
++     *   clock count there: while audio plays it runs the audio's delay behind,
++     *   and its margin follows the audio buffer (~140 ms, 186 after a Wi-Fi
++     *   pause grew it): reported, it lowered the bit rate twice as the audio
++     *   started and halved it at the pause, within 6 minutes;
+      * - following the audio, the margin is about the audio's delay, which
+      *   changes with the output device (~280 ms with AirPods, ~130 built in)
+      *   and peaks for a moment when it does: from 408 to 131 ms, the server
+@@ -2282,7 +2286,7 @@ static void display_handle_stream_data(SpiceChannel *channel, SpiceMsgIn *in)
+     if (st->video_decoder->codec_type == SPICE_VIDEO_CODEC_TYPE_MJPEG) {
+         server_margin = MAX(margin_report, margin);
+     } else if (c->playout_target > 0 && !c->playout_audio) {
+-        server_margin = MAX(margin_report, MIN(margin - c->playout_target, 0) + PLAYOUT_DEFAULT_MS);
++        server_margin = MIN(margin - c->playout_target, 0) + PLAYOUT_DEFAULT_MS;
+     } else {
+         server_margin = MIN(MAX(margin_report, margin), PLAYOUT_DEFAULT_MS);
+         /* a frame late by no more than the decoder still shows is no drop */
+-- 
+2.56.0
+
